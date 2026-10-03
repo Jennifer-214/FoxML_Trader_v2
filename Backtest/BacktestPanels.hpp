@@ -20,6 +20,10 @@
 #define BACKTEST_PANELS_HPP
 
 #include "imgui.h"
+// what the panels draw with, included here rather than left to the suite's include order — a header that parses on its
+// own is one the layout gate's isolate probe and the editor can read (D-414 register, hole 12)
+#include "../GUI/FoxmlTheme.hpp"        // FoxmlColors
+#include "../GUI/DashboardPanels.hpp"   // SectionHeader
 #include "BacktestEngine.hpp"
 #include "TrainingWorkers.hpp"   // E.1.3 MP-1 — the ML producer core the Train buttons drive
 #include "SuiteLease.hpp"        // E.1.3 MP-6 — the suite run lease, the launch funnel and SuiteJob (D-503 / D-506)
@@ -104,12 +108,23 @@ static inline void DataPanel_Init(DataPanelState *state) {
 // [CODE]
 //======================================================================
 static inline void DataPanel_Scan(DataPanelState *state) {
+    // the selection follows the FILE across a rescan, never its index (D-507 review F7): remember the selected names,
+    // then re-mark them in the new, sorted list (StartGate_RekeySelection — cell-tested). Static, not 512 KB of stack;
+    // the Data panel runs on the GUI thread only.
+    static char kept[DATA_MAX_FILES][256];
+    int kept_n = 0;
+    for (int i = 0; i < state->file_count && i < DATA_MAX_FILES; i++)
+        if (state->selected[i]) memcpy(kept[kept_n++], state->files[i], sizeof(kept[0]));
+
     state->file_count = 0;
     state->scanned = true;
 
     // scan data_dir recursively for .csv files
     DIR *dir = opendir(state->data_dir);
-    if (!dir) return;
+    if (!dir) {   // a scan that found nothing selects nothing
+        memset(state->selected, 0, sizeof(state->selected));
+        return;
+    }
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL && state->file_count < DATA_MAX_FILES) {
@@ -149,6 +164,8 @@ static inline void DataPanel_Scan(DataPanelState *state) {
                 memcpy(state->files[i], state->files[j], 256);
                 memcpy(state->files[j], tmp, 256);
             }
+
+    StartGate_RekeySelection(kept, kept_n, state->files, state->file_count, DATA_MAX_FILES, state->selected);
 }
 //======================================================================
 // [END_CODE]
@@ -256,6 +273,10 @@ struct RunControlState {
     // Run Backtest, Collect Features and Collect Multi-Horizon share ONE job: they write the same results, run_config
     // and snapshots (D-506 — the funnel owns its start and its end; progress is a percent)
     SuiteJob job;
+    // the last run's record: the request it started from, written by its worker at its start, under the lease (D-507 —
+    // never by a click); a multi-horizon collect's label pass then names the labels it left in the results
+    // (BacktestRunConfig_RecordLabels). The GUI reads it only with the lease free — in a start's click behind its gate,
+    // and Full Validation's horizon term — and only this thread takes the lease, so no worker is writing it then
     BacktestRunConfig run_config;
     BacktestResults results;
     CandleAccumulator *candle_acc;
@@ -407,9 +428,58 @@ static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
 //======================================================================
 
 // worker thread function
+//======================================================================
+// [STRUCT]_[BacktestWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a Run Backtest / Collect Features worker's own args — the panel it reports to and the request it starts from, built at the click; 64-aligned through BacktestRunConfig, so allocated by TrainingWorkers_AllocZeroed]
+//======================================================================
+// [CODE]
+//======================================================================
 struct BacktestWorkerArgs {
-    RunControlState *state;
+    RunControlState  *state;
+    BacktestRunConfig request;   // the run's input — the worker makes it the run's record once it holds the lease (D-507)
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-10-02]
+//----------------------------------------------------------------------
+// [SIZE]_[577984B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9031]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BacktestWorkerArgs]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[RunControl_ForgetDisplay]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a Run Control run's start, in its worker, holding the lease: forget the display that described the last results — the samples snapshot, the per-horizon collect table, the chart — just before Backtest_Run resets those results]
+//======================================================================
+// Every Run Control run replaces the shared results, so every one retires what described them — Run Backtest used to
+// leave the last collect's per-horizon table standing over results it had just reset. The GUI reads the snapshots only
+// while the job shows no run, and the chart under its own mutex, so the worker can write them here.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void RunControl_ForgetDisplay(RunControlState *state) {
+    memset(&state->stats_snapshot, 0, sizeof(state->stats_snapshot));
+    state->mh_collect_snap_count = 0;
+    if (state->candle_acc)
+        CandleAccumulator_Reset(state->candle_acc);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RunControl_ForgetDisplay]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[backtest_worker_fn]
@@ -424,7 +494,13 @@ struct BacktestWorkerArgs {
 static inline void *backtest_worker_fn(void *arg, uint64_t lease) {
     BacktestWorkerArgs *args = (BacktestWorkerArgs *)arg;
     RunControlState *state = args->state;
+    // the run's start, holding the lease (D-507): its request becomes the record of what the results hold, and the
+    // display that described the last results is forgotten — Backtest_Run resets those results next, so record, display
+    // and data change together. A start the funnel refused never got here and changed none of them; a thread that did not
+    // start never got here either — only its job ended, hiding the last results, as D-506 decided
+    state->run_config = args->request;
     free(args);
+    RunControl_ForgetDisplay(state);
 
     state->last_status = Backtest_Run(lease, &state->results, &state->run_config,
                                       &state->job.progress, &state->job.cancel,
@@ -467,12 +543,13 @@ static inline void *backtest_worker_fn(void *arg, uint64_t lease) {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[worker-thread args for the multi-horizon label-collect job — run_control + the snapped horizon list + parallel per-horizon TP/SL barrier arrays]
+// [OVERVIEW]_[worker-thread args for the multi-horizon label-collect job — run_control + the run's request (the one builder's, as Collect Features) + the snapped horizon list + parallel per-horizon TP/SL barrier arrays; 64-aligned through BacktestRunConfig, so allocated aligned (TrainingWorkers_AllocZeroed)]
 //======================================================================
 // [CODE]
 //======================================================================
 struct CollectMultiHorizonWorkerArgs {
     RunControlState *run_control;
+    BacktestRunConfig request;   // the run's input — the worker makes it the run's record once it holds the lease (D-507)
     int snap_horizon_count;
     int snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     // v5.11.40 — per-horizon TP/SL. Snap-time arrays parallel to
@@ -495,11 +572,11 @@ struct CollectMultiHorizonWorkerArgs {
 //======================================================================
 // [DERIVED]
 // [ORIGIN]_[AUTO]
-// [UPDATED]_[2026-09-01]
-// [SIZE]_[144B]
-// [ALIGN]_[8]
-// [CACHE_LINES]_[3]
-// [STRADDLE]_[snap_tp_pct@44 · snap_label_kind@108]
+// [UPDATED]_[2026-10-02]
+// [SIZE]_[578176B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9034]
+// [STRADDLE]_[snap_tp_pct@578020 · snap_label_kind@578084]
 //======================================================================
 // [END_STRUCT]_[CollectMultiHorizonWorkerArgs]
 //======================================================================
@@ -526,11 +603,13 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     memcpy(tp_pcts,  args->snap_tp_pct,   sizeof(tp_pcts));
     memcpy(sl_pcts,  args->snap_sl_pct,   sizeof(sl_pcts));
     memcpy(label_kinds, args->snap_label_kind, sizeof(label_kinds));
+    // the run's start, holding the lease (D-507) — see backtest_worker_fn: its request becomes the run's record (the
+    // label pass below rewrites the record's label params to the labels it leaves in the results — the last horizon's),
+    // and the display that described the last results is forgotten (E.1.2.G — the stale per-horizon table from a
+    // previous collect must not outlive this one; the count returns non-zero only after [0..count) refills)
+    rc->run_config = args->request;
     free(args);
-
-    // E.1.2.G — stale per-horizon table from a previous collect must not
-    // outlive this one; count returns non-zero only after [0..count) refill.
-    rc->mh_collect_snap_count = 0;
+    RunControl_ForgetDisplay(rc);
 
     // 1. Collect features ONCE. label_forward_ticks at this point is
     //    whatever was set when the button was clicked — we'll overwrite
@@ -545,20 +624,23 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     }
 
     // 2. Per-horizon label diagnostic — ONE batched walk (E.1.2.D leaf 5),
-    //    was one full-corpus walk PER horizon. All targets share the
-    //    collect-time label_type (exactly what the old loop did — it only
-    //    rotated fwd/tp/sl); the LAST target writes rc->results.labels
-    //    directly so the post-loop state (SamplesSnapshot below reads it)
-    //    is bytewise what the old last iteration left behind. rc->run_config
-    //    label fields are no longer mutated, so the old save/restore is gone
-    //    with the mutation itself.
+    //    was one full-corpus walk PER horizon. Each target carries its own
+    //    kind (E.1.2.G — the Label Kind CSV), horizon and barriers; the LAST
+    //    target writes rc->results.labels directly, so the post-loop state
+    //    (SamplesSnapshot below reads it) is the last horizon's — and the
+    //    record then names exactly that target (BacktestRunConfig_RecordLabels,
+    //    D-507 review F1).
     // v5.11.40 — label_tp_pct/label_sl_pct rotate per horizon (broadcast or
     //            per-horizon CSV from operator); double-typed, percent
     //            pass-through without /100.
+    bool labelled = false;   // did the label pass below run — only then are results.labels the last horizon's
     if (!rc->job.cancel && horizon_count > 0) {
         LabelBatchTarget bt[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
         float *tmp_bufs[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
         int bt_ok = 1;
+        // every target's params first, THEN the earlier horizons' buffers: an allocation that fails part-way must not
+        // leave the last target — the one the fallback below labels and the record takes — uninitialised (it used to:
+        // the loop broke before reaching it, and the fallback wrote through a garbage out_labels)
         for (int h = 0; h < horizon_count; ++h) {
             bt[h] = LabelBatchTarget{};
             // E.1.2.G — the CSV override reaches COLLECT exactly as it reaches
@@ -567,14 +649,12 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             bt[h].tp_pct        = (double)tp_pcts[h];
             bt[h].sl_pct        = (double)sl_pcts[h];
             bt[h].forward_ticks = horizons[h];
-            if (h == horizon_count - 1) {
-                bt[h].out_labels = rc->results.labels;   // post-state = last horizon
-            } else {
-                tmp_bufs[h] = (float *)malloc(
-                    (size_t)rc->results.sample_count * sizeof(float));
-                if (!tmp_bufs[h]) { bt_ok = 0; break; }
-                bt[h].out_labels = tmp_bufs[h];
-            }
+        }
+        bt[horizon_count - 1].out_labels = rc->results.labels;   // post-state = last horizon
+        for (int h = 0; h < horizon_count - 1; ++h) {
+            tmp_bufs[h] = (float *)malloc((size_t)rc->results.sample_count * sizeof(float));
+            if (!tmp_bufs[h]) { bt_ok = 0; break; }
+            bt[h].out_labels = tmp_bufs[h];
         }
         if (!bt_ok) {
             // Pathological small-alloc failure: keep the post-state contract
@@ -588,6 +668,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
             Backtest_ComputeLabelsBatch(&rc->results, &rc->run_config,
                                         bt, horizon_count);
         }
+        // the record describes the labels the results now hold — the LAST horizon's, not the click's position 0:
+        // Full Validation, Walk-Forward and the HP sweep take the labels' identity from it (D-507 review F1; until
+        // MP-3a's labels carry their own params)
+        BacktestRunConfig_RecordLabels(&rc->run_config, &bt[horizon_count - 1]);
+        labelled = true;
         // Legacy accumulate-semantics: the old loop's every per-horizon walk
         // folded its NaN counters into results.stats. Same totals, one fold.
         for (int h = 0; h < horizon_count; ++h) {
@@ -640,8 +725,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
                     tp_pcts[h], sl_pcts[h], hs->sample_count, cls);
         }
         // count LAST — the GUI reads once the job shows no run, but a torn mid-loop
-        // count would still describe half-filled rows to the first frame.
-        rc->mh_collect_snap_count = snaps_filled;
+        // count would still describe half-filled rows to the first frame. With a
+        // failed buffer only the last horizon was labelled: no per-horizon table
+        // then — rows before it would be a previous collect's (D-507 second
+        // review, R3); the single line below describes the last horizon.
+        rc->mh_collect_snap_count = bt_ok ? snaps_filled : 0;
         for (int h = 0; h < horizon_count; ++h) free(tmp_bufs[h]);
     } else if (rc->job.cancel) {
         fprintf(stderr, "[collect-mh] cancelled at horizon 0/%d\n", horizon_count);
@@ -650,14 +738,17 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     // 3. Final SamplesSnapshot from whatever the last horizon's labels are
     //    (operator's "current" view — Train Multi-Horizon will recompute
     //    per-horizon during training so this just reflects the last loop
-    //    iteration's distribution).
+    //    iteration's distribution). The record's kind is those labels' kind:
+    //    the label pass recorded it (or, with no pass, the request's made them).
     SamplesSnapshot_Compute(&rc->stats_snapshot, &rc->results,
                               rc->run_config.label_type);
     // TECH_DEBT-302 (b) — stamp WHICH horizon that was, so the panel can stop implying the
     // distribution describes the whole run. Multi-horizon only; a single-horizon collect leaves
     // it 0 and the panel omits the qualifier.
+    // Only when the label pass ran: a collect cancelled before it keeps the replay's labels, made with the
+    // request's horizon (R4).
     rc->stats_snapshot.horizon_ticks =
-        (horizon_count > 1 && horizon_count <= ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX)
+        (labelled && horizon_count > 1 && horizon_count <= ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX)
             ? horizons[horizon_count - 1] : 0;
 
     SuiteJob_Publish(&rc->job);
@@ -670,55 +761,57 @@ static inline void *collect_multi_horizon_worker_fn(void *arg, uint64_t lease) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[RunControl_BuildRequest]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE request every Run Control run starts from — the Data panel's selection, the Run Control panel's cfg path and bandit prior, and a collect's label params — read into the worker's own args by the cell-tested BacktestRunConfig_FromSelection; returns the number of files]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int RunControl_BuildRequest(BacktestRunConfig *out, const RunControlState *rc, const DataPanelState *data,
+                                          const BacktestLabelRequest *collect) {
+    return BacktestRunConfig_FromSelection(out, data->files, data->selected, data->file_count, DATA_MAX_FILES,
+                                           rc->config_path, rc->bandit_state_prior_path, collect);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[RunControl_BuildRequest]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[RunControl_Start]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[spawn the backtest worker thread for the selected files + config]
+// [OVERVIEW]_[start Run Backtest — its request built into the worker's own args (nothing shared changes unless the run starts), then through the suite's funnel]
 //======================================================================
 //======================================================================
 // [CODE]
 //======================================================================
 static inline void RunControl_Start(RunControlState *state, DataPanelState *data) {
-    // build run config from data panel selection
-    state->run_config.num_data_files = 0;
-    for (int i = 0; i < data->file_count && state->run_config.num_data_files < MAX_DATA_FILES; i++) {
-        if (data->selected[i]) {
-            strncpy(state->run_config.data_paths[state->run_config.num_data_files],
-                    data->files[i], 255);
-            state->run_config.num_data_files++;
-        }
-    }
-
-    if (state->run_config.num_data_files == 0) return;
-
-    strncpy(state->run_config.config_path, state->config_path, 255);
-    // D-483 C — the operator's explicit bandit prior (buy-side Exp3 file; bundle-id check skipped
-    // by design at the consumer — transfer learning between sibling bundles). "" = start uniform.
-    strncpy(state->run_config.bandit_state_prior_path, state->bandit_state_prior_path,
-            sizeof(state->run_config.bandit_state_prior_path) - 1);
-    state->run_config.bandit_state_prior_path[sizeof(state->run_config.bandit_state_prior_path) - 1] = '\0';
-    state->run_config.use_config_override = 0;
-    state->run_config.collect_features = 0;
-
-    // reset what the job does not own (the funnel resets the job itself, under the lease)
-    memset(&state->stats_snapshot, 0, sizeof(state->stats_snapshot));
-    if (state->candle_acc)
-        CandleAccumulator_Init(state->candle_acc, 60);
-
-    // start through the suite's funnel: it takes the lease or refuses naming the holder, and a
-    // second start while a run is on refuses there (the funnel is the guard)
-    BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
+    // D-507 — the click writes only its own request; the run's record, its display and the shared results change in
+    // the worker, holding the lease — so a start the funnel refuses changes none of them, and a thread that does not
+    // start changes none of them either: the funnel ends the job it began, which hides the last results (D-506).
+    // (D-483 C's explicit bandit prior rides the request — "" = start uniform.)
+    BacktestWorkerArgs *args = TrainingWorkers_AllocZeroed<BacktestWorkerArgs>();
     if (!args) {
         snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Backtest: out of memory");
         return;
     }
     args->state = state;
+    if (RunControl_BuildRequest(&args->request, state, data, nullptr) == 0) {   // the gate already requires a file
+        snprintf(state->launch_msg, sizeof(state->launch_msg), "Run Backtest: no data files selected");
+        free(args);
+        return;
+    }
+    // the funnel takes the lease or refuses naming the holder (a refused or failed start leaves the args with us)
     if (SuiteWorker_Launch("Run Backtest", &state->job, backtest_worker_fn, args, state->launch_msg,
                            sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
         state->launch_msg[0] = '\0';
     else
-        free(args);   // a refused or failed start leaves the args with the caller
+        free(args);
 }
 //======================================================================
 // [END_CODE]
@@ -3001,8 +3094,6 @@ struct OptimizerPanelState {
     int metric_idx;
     OptimizerResults results;
     SuiteJob job;   // Grid Search (D-506 — the funnel owns its start and its end; progress counts cells of total)
-    // copies for the worker thread
-    BacktestRunConfig run_config;
     char config_path[256];
     char launch_msg[160];   // GUI thread only — why the last Grid Search did not start ("" = it did)
 };
@@ -3012,9 +3103,9 @@ struct OptimizerPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[961920B]
+// [SIZE]_[384064B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[15030]
+// [CACHE_LINES]_[6001]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[OptimizerPanelState]
@@ -3053,16 +3144,47 @@ static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
 // [END_FUNCTION]_[OptimizerPanel_Init]
 //======================================================================
 
+//======================================================================
+// [STRUCT]_[OptWorkerArgs]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a Grid Search worker's own args — the panel it reports to and every input of its sweep, snapped at the click: the request, the ranges (their keys included), the parameter count and the metric; 64-aligned through BacktestRunConfig]
+//======================================================================
+// The sweep used to read the panel's ranges, count and metric while it ran, and those inputs stay editable during a
+// run: changing an axis's key mid-sweep made the remaining cells set a different cfg field with values computed for
+// the old one (Class 13). It reads only these now (D-507).
+//======================================================================
+// [CODE]
+//======================================================================
 struct OptWorkerArgs {
     OptimizerPanelState *state;
+    BacktestRunConfig    request;
+    OptimizerRange       ranges[OPT_MAX_PARAMS];
+    int                  num_params;
+    int                  metric_idx;
 };
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-10-02]
+//----------------------------------------------------------------------
+// [SIZE]_[578112B]
+// [ALIGN]_[64]
+// [CACHE_LINES]_[9033]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[OptWorkerArgs]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[optimizer_worker_fn]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[background thread: run a parameter sweep]
+// [OVERVIEW]_[background thread: run a parameter sweep from its click-time args — they live until the sweep ends]
 //======================================================================
 //======================================================================
 // [CODE]
@@ -3070,11 +3192,11 @@ struct OptWorkerArgs {
 static inline void *optimizer_worker_fn(void *arg, uint64_t lease) {
     OptWorkerArgs *args = (OptWorkerArgs *)arg;
     OptimizerPanelState *state = args->state;
-    free(args);
 
-    Backtest_RunSweep(lease, &state->results, &state->run_config,
-                       state->ranges, state->num_params, state->metric_idx,
+    Backtest_RunSweep(lease, &state->results, &args->request,
+                       args->ranges, args->num_params, args->metric_idx,
                        &state->job.progress, &state->job.total, &state->job.cancel);
+    free(args);   // the sweep read them to its last cell
 
     SuiteJob_Publish(&state->job);
     return NULL;
@@ -3102,7 +3224,9 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
     static const char *metric_names[] = {"Sharpe", "Profit Factor", "Expectancy", "Return %", "P&L $"};
     ImGui::Combo("Metric", &state->metric_idx, metric_names, 5);
 
-    ImGui::SliderInt("Parameters", &state->num_params, 1, 2);
+    // AlwaysClamp: a Ctrl+Click typed value is clamped too — a 3 used to reach the range editors below and write
+    // ranges[2], past the array (D-507 second review, R2)
+    ImGui::SliderInt("Parameters", &state->num_params, 1, OPT_MAX_PARAMS, "%d", ImGuiSliderFlags_AlwaysClamp);
 
     // v5.10.0a — sweepable cfg key picker. Supports the cfg fields recognized
     // by ConfigField_Set (BacktestEngine.hpp). Operator selects from
@@ -3174,8 +3298,9 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         ImGui::PopID();
     }
 
-    int total_combos = state->ranges[0].steps() * (state->num_params > 1 ? state->ranges[1].steps() : 1);
-    ImGui::Text("Total combinations: %d", total_combos);
+    const long long total_combos = (long long)state->ranges[0].steps() *
+                                   (state->num_params > 1 ? state->ranges[1].steps() : 1);   // 64 bits: never wraps
+    ImGui::Text("Total combinations: %lld", total_combos);
 
     ImGui::Separator();
 
@@ -3190,31 +3315,27 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
     } else {
         // its gate (D-507; Backtest/SuiteStartGates.hpp) — each axis checked on its own, so two inverted ranges can no
         // longer multiply to a positive count
-        const SuiteGate gate = StartGate_GridSearch(DataPanel_SelectedCount(data), state->ranges[0].steps(),
+        const SuiteGate gate = StartGate_GridSearch(DataPanel_SelectedCount(data), state->num_params, OPT_MAX_PARAMS,
+                                                    state->ranges[0].steps(),
                                                     state->num_params > 1 ? state->ranges[1].steps() : 1,
-                                                    OPT_MAX_GRID);
+                                                    OPT_MAX_STEPS, OPT_MAX_GRID);
         const bool can_run = SuiteGate_Open(&gate);
         if (!can_run) ImGui::BeginDisabled();
         if (ImGui::Button("Run Grid Search")) {
-            // build run config from data selection
-            state->run_config.num_data_files = 0;
-            for (int i = 0; i < data->file_count && state->run_config.num_data_files < MAX_DATA_FILES; i++) {
-                if (data->selected[i]) {
-                    strncpy(state->run_config.data_paths[state->run_config.num_data_files],
-                            data->files[i], 255);
-                    state->run_config.num_data_files++;
-                }
-            }
-            strncpy(state->run_config.config_path, state->config_path, 255);
-            state->run_config.use_config_override = 0;
-            state->run_config.collect_features = 0;
-
-            // start through the suite's funnel — it resets the job under the lease, or refuses naming the holder
-            OptWorkerArgs *args = (OptWorkerArgs *)malloc(sizeof(OptWorkerArgs));
+            // D-507 — every input of the sweep is snapped into the worker's own args (the request from the shared
+            // builder — no bandit prior: a sweep starts uniform — the ranges with their keys, the count, the metric);
+            // the panel's fields stay editable and a running sweep never reads them
+            OptWorkerArgs *args = TrainingWorkers_AllocZeroed<OptWorkerArgs>();
             if (!args) {
                 snprintf(state->launch_msg, sizeof(state->launch_msg), "Grid Search: out of memory");
             } else {
                 args->state = state;
+                BacktestRunConfig_FromSelection(&args->request, data->files, data->selected, data->file_count,
+                                                DATA_MAX_FILES, state->config_path, "", nullptr);
+                memcpy(args->ranges, state->ranges, sizeof(args->ranges));
+                args->num_params = state->num_params;
+                args->metric_idx = state->metric_idx;
+                // the funnel resets the job under the lease, or refuses naming the holder
                 if (SuiteWorker_Launch("Grid Search", &state->job, optimizer_worker_fn, args, state->launch_msg,
                                        sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED)
                     state->launch_msg[0] = '\0';
@@ -3247,10 +3368,10 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
             ImGui::TextColored(FoxmlColors::red, "No cell ran — there is no best");
         } else {
             ImGui::TextColored(ResultsPnlColor(r->stats[bi].total_pnl),
-                               "Best: %s=%.2f", state->ranges[0].key,
+                               "Best: %s=%.2f", r->keys[0],
                                r->param_vals[0][bi / r->dims[1]]);
             if (r->num_params > 1)
-                ImGui::SameLine(), ImGui::Text(" %s=%.2f", state->ranges[1].key,
+                ImGui::SameLine(), ImGui::Text(" %s=%.2f", r->keys[1],
                                                 r->param_vals[1][bi % r->dims[1]]);
             ImGui::Text("P&L $%.2f  |  Sharpe %.2f  |  WR %.1f%%  |  PF %.2f",
                          r->stats[bi].total_pnl, r->stats[bi].sharpe_ratio,
@@ -3260,7 +3381,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         // 1D: bar chart
         if (r->num_params == 1) {
             if (ImPlot::BeginPlot("Sweep", ImVec2(-1, 200))) {
-                ImPlot::SetupAxes(state->ranges[0].key, metric_names[state->metric_idx]);
+                ImPlot::SetupAxes(r->keys[0], metric_names[r->metric_idx]);
                 ImPlot::PlotBars("##metric", r->param_vals[0], r->metric, r->dims[0], 0.6);
                 ImPlot::EndPlot();
             }
@@ -3269,7 +3390,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         // 2D: heatmap
         if (r->num_params == 2) {
             if (ImPlot::BeginPlot("Heatmap", ImVec2(-1, 250))) {
-                ImPlot::SetupAxes(state->ranges[0].key, state->ranges[1].key);
+                ImPlot::SetupAxes(r->keys[0], r->keys[1]);
                 ImPlot::PlotHeatmap("##heat", r->metric, r->dims[1], r->dims[0],
                                      0, 0, NULL,
                                      ImPlotPoint(r->param_vals[0][0], r->param_vals[1][0]),
@@ -3286,9 +3407,9 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
                               ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV |
                               ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY,
                               ImVec2(0, 200))) {
-            ImGui::TableSetupColumn(state->ranges[0].key, ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn(r->keys[0], ImGuiTableColumnFlags_WidthFixed, 70);
             if (r->num_params > 1)
-                ImGui::TableSetupColumn(state->ranges[1].key, ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn(r->keys[1], ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("P&L", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("WR%", ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("PF", ImGuiTableColumnFlags_WidthFixed, 50);
@@ -3507,10 +3628,10 @@ struct TrainingPanelState {
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-02]
-// [SIZE]_[412288B]
+// [SIZE]_[412416B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6442]
-// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409448 · ui_sl_pct_csv@409512 · ui_label_kind_csv@411908]
+// [CACHE_LINES]_[6444]
+// [STRADDLE]_[run_name@11920 · ui_tp_pct_csv@409576 · ui_sl_pct_csv@409640 · ui_label_kind_csv@412036]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
 //======================================================================
@@ -3542,7 +3663,7 @@ struct TrainingPanelState {
 // short purge can still ask for one). Falls back to the legacy 1000 only
 // when auto is requested and NO horizon list exists to derive from.
 static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
-    if (!st) return 1000;
+    if (!st) return LABEL_DEFAULT_FORWARD_TICKS;
     if (st->wf_horizon_ticks > 0) return st->wf_horizon_ticks;  // explicit override
     int mx = 0;
     for (int i = 0; i < st->ui_horizon_count
@@ -3551,12 +3672,86 @@ static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
     }
     if (mx > 0) return mx;
     if (st->label_forward_ticks > 0) return st->label_forward_ticks;  // single-horizon flows
-    return 1000;  // no horizons known — the historical default
+    return LABEL_DEFAULT_FORWARD_TICKS;  // no horizons known — the label pass's own default
 }
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[Training_ResolvePurgeHorizon]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Training_ResolvePurgeForLabels]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the purge a run that trains on the COLLECTED labels uses — the panel's (auto or explicit) widened, in auto, to the labels' own horizon (Label_PurgeCovering); Walk-Forward, the HP sweep and Full Validation read it at their click]
+//======================================================================
+// The Horizons CSV is the next collect's input and can be edited after one: shrink it from 15000 to 1000 and an auto
+// purge of 1000 ran against 15000-tick labels — the leak Training_ResolvePurgeHorizon's own comment names (D-507 third
+// review, A2). Reads the run's record: call it at a click, or only while the lease is free.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Training_ResolvePurgeForLabels(const TrainingPanelState *st, const BacktestRunConfig *rec,
+                                                 const BacktestResults *data) {
+    return Label_PurgeCovering(Training_ResolvePurgeHorizon(st), st && st->wf_horizon_ticks > 0,
+                               BacktestRunConfig_LabelsHorizon(rec, data ? data->sample_count : 0));
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Training_ResolvePurgeForLabels]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_CollectLabels]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the label params both collect buttons ask for — ONE copy where each click used to hand-copy six fields]
+//======================================================================
+// D-476 — the kind obeys the Label Kind CSV like every other click (position 0), as the field's own warning promises
+// (TECH_DEBT-323); s5 leaf-15 — the fee rides with its siblings; D-477 — a feature mask of 0 means all on.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline BacktestLabelRequest TrainingPanel_CollectLabels(const TrainingPanelState *state) {
+    BacktestLabelRequest l{};
+    l.label_type        = Label_ResolveKindForHorizon(state->ui_label_kind_per_horizon,
+                                                      state->ui_label_kind_per_horizon_count, state->label_type, 0);
+    l.forward_ticks     = state->label_forward_ticks;
+    l.tp_pct            = state->label_tp_pct;
+    l.sl_pct            = state->label_sl_pct;
+    l.roundtrip_fee_pct = state->label_roundtrip_fee_pct;
+    l.feature_mask      = state->ui_feature_mask;
+    return l;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_CollectLabels]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingPanel_ForgetDatasetResults]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [ML] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a started collect replaces the dataset: forget the results that describe it — the walk-forward's and the HP sweep's — and keep what describes a model: the per-horizon training table, the training status line, Full Validation's results (D-507 call 4)]
+//======================================================================
+// Called only once a collect has STARTED: the lease is the collect's then, so no job writes these results.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void TrainingPanel_ForgetDatasetResults(TrainingPanelState *state) {
+    SuiteJob_Forget(&state->wf_job);
+    SuiteJob_Forget(&state->hp_job);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingPanel_ForgetDatasetResults]
 //======================================================================
 
 //======================================================================
@@ -3654,7 +3849,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // generic "run" surfaces less misleading than a specific-looking number.
     // Worker appends "_horizon_<H>" so even default produces "run_horizon_*".
     strncpy(state->run_name, "run", sizeof(state->run_name) - 1);
-    state->label_forward_ticks = 1000;
+    state->label_forward_ticks = LABEL_DEFAULT_FORWARD_TICKS;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
     // walk-forward defaults (FoxML battle-tested values)
     state->wf_n_splits = 5;
@@ -3970,7 +4165,7 @@ static inline FullValidationWorkerArgs *TrainingPanel_FullValidationArgs(Trainin
                                       fv_data, &run_control->run_config);
     // The rest from the panel at click time.
     r.wf_n_splits       = state->wf_n_splits;
-    r.wf_horizon_ticks  = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
+    r.wf_horizon_ticks  = Training_ResolvePurgeForLabels(state, &run_control->run_config, fv_data);   // s5 leaf-16 + A2
     r.wf_buffer_ticks   = state->wf_buffer_ticks;
     r.wf_min_train      = state->wf_min_train;
     r.gap_threshold     = state->fv_gap_threshold;
@@ -4688,51 +4883,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (single_horizon_mode) {
     if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
-        // set up run config with feature collection enabled
-        run_control->run_config.num_data_files = 0;
-        for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
-            if (data->selected[i]) {
-                strncpy(run_control->run_config.data_paths[run_control->run_config.num_data_files],
-                        data->files[i], 255);
-                run_control->run_config.num_data_files++;
-            }
-        }
-        strncpy(run_control->run_config.config_path, run_control->config_path, 255);
-        run_control->run_config.use_config_override = 0;
-        run_control->run_config.collect_features = 1;
-        // D-476 — the single-horizon click obeys the Label Kind CSV like every other
-        // click (position 0), as the field's own warning promises (TECH_DEBT-323).
-        run_control->run_config.label_type = Label_ResolveKindForHorizon(
-            state->ui_label_kind_per_horizon,
-            state->ui_label_kind_per_horizon_count, state->label_type, 0);
-        run_control->run_config.label_tp_pct = state->label_tp_pct;
-        run_control->run_config.label_sl_pct = state->label_sl_pct;
-        // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
-        run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
-        run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
-        run_control->run_config.label_forward_ticks = state->label_forward_ticks;
-
-        // start the run — what the job does not own resets here; the funnel resets the job
-        memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
-        run_control->mh_collect_snap_count = 0;   // E.1.2.G — single collect: retire any stale per-horizon table
-
-        if (run_control->candle_acc)
-            CandleAccumulator_Init(run_control->candle_acc, 60);
-
-        BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
+        // D-507 — the request is built into the worker's own args: the shared run config, the display and the dataset
+        // change only in the worker, holding the lease (the label params: TrainingPanel_CollectLabels — D-476's
+        // position-0 kind, the barriers, the fee, the horizon, the feature mask)
+        BacktestWorkerArgs *args = TrainingWorkers_AllocZeroed<BacktestWorkerArgs>();
         if (!args) {
             snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Features: out of memory");
         } else {
             args->state = run_control;
+            const BacktestLabelRequest labels = TrainingPanel_CollectLabels(state);
+            RunControl_BuildRequest(&args->request, run_control, data, &labels);
             if (SuiteWorker_Launch("Collect Features", &run_control->job, backtest_worker_fn, args,
                                    state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 state->launch_msg[0] = '\0';
-                // the collect started: the results that describe the dataset it replaces clear — training, walk-forward
-                // and the HP sweep (step 7: the HP sweep's used to survive a re-collect; step 8: only once started,
-                // so a collect that did not start clears nothing — the lease is the collect's, so no job writes them now)
-                state->status_msg[0] = '\0';
-                SuiteJob_Forget(&state->wf_job);
-                SuiteJob_Forget(&state->hp_job);
+                TrainingPanel_ForgetDatasetResults(state);   // only once started: the lease is the collect's now
             } else {
                 free(args);
             }
@@ -4743,7 +4907,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "for every slow-path cycle. Required before Train Model.\n\n"
         "Output goes to results->feature_matrix (in-memory). The dataset\n"
         "rebuilds every time you click — use Run Control's Run Backtest if\n"
-        "you only need stats and want to skip the sample collection cost.");
+        "you only need stats and want to skip the sample collection cost.\n\n"
+        "The replay uses Run Control's Bandit prior, if one is set (the\n"
+        "features and labels do not depend on it; the run's P&L can).");
     if (!can_collect) ImGui::EndDisabled();
     // the Run Control job's own run shows its progress (it holds the lease — or the click above just started it);
     // any other reason is the gate's
@@ -4780,82 +4946,49 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
-        // build run_config (mirrors single-horizon Collect Features above)
-        run_control->run_config.num_data_files = 0;
-        for (int i = 0; i < data->file_count
-                          && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
-            if (data->selected[i]) {
-                strncpy(run_control->run_config.data_paths[run_control->run_config.num_data_files],
-                        data->files[i], 255);
-                run_control->run_config.num_data_files++;
-            }
-        }
-        strncpy(run_control->run_config.config_path, run_control->config_path, 255);
-        run_control->run_config.use_config_override = 0;
-        run_control->run_config.collect_features = 1;
-        // D-476 — the single-horizon click obeys the Label Kind CSV like every other
-        // click (position 0), as the field's own warning promises (TECH_DEBT-323).
-        run_control->run_config.label_type = Label_ResolveKindForHorizon(
-            state->ui_label_kind_per_horizon,
-            state->ui_label_kind_per_horizon_count, state->label_type, 0);
-        run_control->run_config.label_tp_pct = state->label_tp_pct;
-        run_control->run_config.label_sl_pct = state->label_sl_pct;
-        // s5 leaf-15 — the fee rides the same click-time copy as its siblings.
-        run_control->run_config.label_roundtrip_fee_pct = state->label_roundtrip_fee_pct;
-        run_control->run_config.feature_mask = state->ui_feature_mask;   // D-477 — 0 = all-on
-        run_control->run_config.label_forward_ticks = state->label_forward_ticks;
-
-        // what the job does not own resets here; the funnel resets the job
-        memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
-        run_control->mh_collect_snap_count = 0;   // E.1.2.G — worker refills
-
-        if (run_control->candle_acc)
-            CandleAccumulator_Init(run_control->candle_acc, 60);
-
-        // the click-time snapshot is built on the stack; the heap copy the worker frees is made only to launch
-        CollectMultiHorizonWorkerArgs snap{};
-        snap.run_control = run_control;
-        snap.snap_horizon_count = mh_collect_horizon_count;
-        // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
-        // single value (count==1) broadcasts to all horizons; N values
-        // map positionally. Single label_tp_pct/_sl_pct float as
-        // ultimate fallback (CSV totally empty).
-        float bcast_tp = (state->ui_tp_per_horizon_count > 0)
-            ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
-        float bcast_sl = (state->ui_sl_per_horizon_count > 0)
-            ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
-        // E.1.2.G — kinds snap with the SAME broadcast-or-positional resolution
-        // the TRAIN click uses. Collect previously labelled every horizon with
-        // the dropdown while train obeyed the CSV — the panel could summarize
-        // a label training never consumed (measured 2026-09-01).
-        for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
-            snap.snap_horizons[i] = (i < mh_collect_horizon_count)
-                ? state->ui_horizon_list[i] : 0;
-            snap.snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
-                                   && i < state->ui_tp_per_horizon_count)
-                ? state->ui_tp_per_horizon[i] : bcast_tp;
-            snap.snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
-                                   && i < state->ui_sl_per_horizon_count)
-                ? state->ui_sl_per_horizon[i] : bcast_sl;
-            // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
-            snap.snap_label_kind[i] = Label_ResolveKindForHorizon(
-                state->ui_label_kind_per_horizon,
-                state->ui_label_kind_per_horizon_count, state->label_type, i);
-        }
-        auto *args = (CollectMultiHorizonWorkerArgs *)malloc(sizeof(CollectMultiHorizonWorkerArgs));
+        // D-507 — everything the run starts from is snapped into the worker's own args (the request — built by the
+        // same builder and label params as Collect Features — and the per-horizon arrays); the shared run config, the
+        // display and the dataset change only in the worker, holding the lease. Built in place on the heap: with the
+        // request inside, the args are ~578 KB — no stack copy.
+        auto *args = TrainingWorkers_AllocZeroed<CollectMultiHorizonWorkerArgs>();
         if (!args) {
             snprintf(state->launch_msg, sizeof(state->launch_msg), "Collect Multi-Horizon: out of memory");
         } else {
-            *args = snap;
+            CollectMultiHorizonWorkerArgs &snap = *args;
+            snap.run_control = run_control;
+            const BacktestLabelRequest labels = TrainingPanel_CollectLabels(state);
+            RunControl_BuildRequest(&snap.request, run_control, data, &labels);
+            snap.snap_horizon_count = mh_collect_horizon_count;
+            // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
+            // single value (count==1) broadcasts to all horizons; N values
+            // map positionally. Single label_tp_pct/_sl_pct float as
+            // ultimate fallback (CSV totally empty).
+            float bcast_tp = (state->ui_tp_per_horizon_count > 0)
+                ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
+            float bcast_sl = (state->ui_sl_per_horizon_count > 0)
+                ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+            // E.1.2.G — kinds snap with the SAME broadcast-or-positional resolution
+            // the TRAIN click uses. Collect previously labelled every horizon with
+            // the dropdown while train obeyed the CSV — the panel could summarize
+            // a label training never consumed (measured 2026-09-01).
+            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+                snap.snap_horizons[i] = (i < mh_collect_horizon_count)
+                    ? state->ui_horizon_list[i] : 0;
+                snap.snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
+                                       && i < state->ui_tp_per_horizon_count)
+                    ? state->ui_tp_per_horizon[i] : bcast_tp;
+                snap.snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
+                                       && i < state->ui_sl_per_horizon_count)
+                    ? state->ui_sl_per_horizon[i] : bcast_sl;
+                // D-476 — ONE kind rule for every click (Label_ResolveKindForHorizon).
+                snap.snap_label_kind[i] = Label_ResolveKindForHorizon(
+                    state->ui_label_kind_per_horizon,
+                    state->ui_label_kind_per_horizon_count, state->label_type, i);
+            }
             if (SuiteWorker_Launch("Collect Multi-Horizon", &run_control->job, collect_multi_horizon_worker_fn, args,
                                    state->launch_msg, sizeof(state->launch_msg)) == SUITE_LAUNCH_STARTED) {
                 state->launch_msg[0] = '\0';
-                // the collect started: the results that describe the dataset it replaces clear — training, walk-forward
-                // and the HP sweep (step 7: the HP sweep's used to survive a re-collect; step 8: only once started,
-                // so a collect that did not start clears nothing — the lease is the collect's, so no job writes them now)
-                state->status_msg[0] = '\0';
-                SuiteJob_Forget(&state->wf_job);
-                SuiteJob_Forget(&state->hp_job);
+                TrainingPanel_ForgetDatasetResults(state);   // only once started: the lease is the collect's now
             } else {
                 free(args);
             }
@@ -4868,9 +5001,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Useful for inspecting per-horizon label class distribution\n"
         "BEFORE committing to a multi-horizon train run. Per-horizon\n"
         "valid-sample counts go to engine.log.\n\n"
-        "Final results->labels[] holds the LAST horizon's labels;\n"
-        "Train Multi-Horizon will recompute per horizon during\n"
-        "training, so nothing is lost.");
+        "Final results->labels[] holds the LAST horizon's labels (a collect\n"
+        "cancelled before its label pass keeps the first horizon's), and the\n"
+        "run's record names them: Walk-Forward and the HP sweep run on them,\n"
+        "and Full Validation takes only that horizon's model (Model Path in\n"
+        "its horizon_<H> directory). Train Multi-Horizon recomputes per\n"
+        "horizon, so nothing is lost.\n\n"
+        "The replay uses Run Control's Bandit prior, if one is set.");
 
     // the Run Control job's own run shows its progress; any other reason is the gate's (v5.11.40's TP/SL
     // misalignment hint is one of its terms)
@@ -5111,17 +5248,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                     ? 100.0f * snap->class_counts[k] / snap->sample_count : 0.0f);
             }
             ImGui::TextUnformatted(buf);
-            // TECH_DEBT-302 (b) — say WHOSE distribution this is. Under a multi-horizon collect the
-            // snapshot is computed from the single results->labels[] array, which holds whatever
-            // the LAST loop iteration wrote — so these counts describe ONE horizon, not the run.
-            // The other horizons' splits exist only as [collect-mh] stderr lines. Presenting them
-            // unqualified is how a 61.5/34.4/4.1 read as "the run's" label balance.
-            if (snap->horizon_ticks > 0) {
-                ImGui::TextColored(FoxmlColors::comment,
-                                   "  ^ horizon %d ticks ONLY (last of the multi-horizon collect) "
-                                   "— other horizons differ; see [collect-mh] lines",
-                                   snap->horizon_ticks);
-            }
             ImGui::SetItemTooltip("Multiclass labels — per-class sample counts.\n"
                                   "c0..cK-1 = class index (e.g. for Peak/Valley/Stable:\n"
                                   "  c0=stable, c1=peak, c2=valley)\n\n"
@@ -5281,6 +5407,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::TextColored(*bn_col, "Diagnosis: %s", bn_text);
             ImGui::SetItemTooltip("%s", bn_tip);
         }
+        // TECH_DEBT-302 (b) — say WHOSE distribution this is, for EVERY label kind. Under a multi-horizon collect the
+        // snapshot is computed from the single results->labels[] array, which holds the LAST horizon's labels — so the
+        // line above describes ONE horizon, not the run; the other horizons' splits are the per-horizon table's or the
+        // [collect-mh] stderr lines. (Moved out of the multiclass branch — a regression or binary line went unqualified:
+        // D-507 third review, A4.)
+        if (snap->horizon_ticks > 0) {
+            ImGui::TextColored(FoxmlColors::comment,
+                               "  ^ horizon %d ticks ONLY (last of the multi-horizon collect) "
+                               "— other horizons differ; see [collect-mh] lines",
+                               snap->horizon_ticks);
+        }
     }
 
     ImGui::Separator();
@@ -5394,21 +5531,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
     }
 
-    // v5.11.48 — only show Model Path in single-horizon mode. In multi-mode
-    // the worker auto-generates save paths from run_name + horizon dir, so
-    // Model Path is unused noise. Run Walk-Forward worker doesn't use it
-    // either (operates on results->* in memory). Run Full Validation worker
-    // uses it for auto_stamp_path output, but Multi-Horizon worker has its
-    // own per-horizon stamp path already.
-    if (single_horizon_mode) {
-        ImGui::InputText("Model Path (Save Run output)", state->model_path, sizeof(state->model_path));
-        ImGui::SetItemTooltip(
-            "Output path for Run Full Validation auto-stamp.\n"
-            "Single-horizon mode only.\n\n"
-            "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
-            "save paths from Run Name + the nested family layout (D-431)\n"
-            "(models/<class>/<run_name>/horizon_<H>/<role>.json).");
-    }
+    // The model Run Full Validation validates and re-stamps — shown in BOTH horizon modes, since Full Validation is
+    // (v5.11.48 hid it in multi-horizon mode while Full Validation still read it: an input that drove a stamp with no
+    // way to see it — D-507 third review, A1). Train Model / Train Multi-Horizon do not read it.
+    ImGui::InputText("Model Path (Full Validation)", state->model_path, sizeof(state->model_path));
+    ImGui::SetItemTooltip(
+        "The model Run Full Validation validates and re-stamps.\n"
+        "Point it at the model of the collected labels' horizon:\n"
+        "  models/<class>/<run_name>/horizon_<H>/<role>.json\n"
+        "Full Validation refuses a model of another horizon, and a path\n"
+        "that names no horizon_<H> directory (its horizon cannot be checked).\n\n"
+        "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
+        "save paths from Run Name + the nested family layout (D-431).");
 
     // v5.11.48 — Run Name prefix input rendered HERE (before Train buttons)
     // so operator sees + sets it BEFORE clicking train. The same field is
@@ -5485,8 +5619,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // Train Model is the multi-horizon run with N=1 (v5.11.44).
         int single_h = (state->ui_horizon_count >= 1)
                      ? state->ui_horizon_list[0]
-                     : (state->label_forward_ticks > 0
-                        ? state->label_forward_ticks : 1000);
+                     : Label_EffectiveForwardTicks(state->label_forward_ticks);
 
         // MP-1 — the same request builder as Train Multi-Horizon: one horizon, and the operator's
         // training side applies here too (v5.13.5.A — one exit-side model without a CSV). The launch
@@ -5715,8 +5848,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // s5 leaf-16 — show the operator what AUTO actually resolved to, so the
     // derived value is visible rather than implied.
     if (state->wf_horizon_ticks == 0) {
+        // the value the clicks will use — it covers the collected labels too (A2); the record is read only with the lease
+        // free (see Full Validation's gate below), and while a run holds it no click can start
+        const bool auto_lease_free = !SuiteLease_Busy();
         ImGui::SameLine();
-        ImGui::TextDisabled("(auto = %d)", Training_ResolvePurgeHorizon(state));
+        ImGui::TextDisabled("(auto = %d)",
+                            auto_lease_free ? Training_ResolvePurgeForLabels(state, &run_control->run_config,
+                                                                             &run_control->results)
+                                            : Training_ResolvePurgeHorizon(state));
     }
     ImGui::SetItemTooltip("Label forward window in ticks — drives the purge gap\n"
                           "between train and test folds (prevents labels that look\n"
@@ -5760,7 +5899,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // run_config (the field that produced results->labels[]), same
                 // resolver-SSoT choice as the Run-Full-Validation path.
                 wf_args->snap_wf_n_splits      = state->wf_n_splits;
-                wf_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
+                wf_args->snap_wf_horizon_ticks = Training_ResolvePurgeForLabels(state, &run_control->run_config, results);   // s5 leaf-16 + A2
                 wf_args->snap_wf_buffer_ticks  = state->wf_buffer_ticks;
                 wf_args->snap_wf_min_train     = state->wf_min_train;
                 wf_args->snap_label_type       = run_control->run_config.label_type;
@@ -6098,7 +6237,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "  / xgb_seed");
     {
         ImGui::PushItemWidth(-180);
-        ImGui::SliderInt("Sweep params (1 or 2)", &state->hp_num_params, 1, OPT_MAX_PARAMS);
+        ImGui::SliderInt("Sweep params (1 or 2)", &state->hp_num_params, 1, OPT_MAX_PARAMS, "%d",
+                         ImGuiSliderFlags_AlwaysClamp);   // a typed value clamped too (R2 — the editors index by it)
         for (int p = 0; p < state->hp_num_params; ++p) {
             ImGui::PushID(p);
             char hdr[32]; snprintf(hdr, sizeof(hdr), "Sweep Param %d", p + 1);
@@ -6112,18 +6252,19 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             ImGui::PopID();
         }
-        int hp_total_cells = state->hp_ranges[0].steps()
-                            * (state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1);
-        ImGui::Text("Total cells: %d", hp_total_cells);
+        const long long hp_total_cells = (long long)state->hp_ranges[0].steps()
+                                       * (state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1);   // never wraps
+        ImGui::Text("Total cells: %lld", hp_total_cells);
         ImGui::PopItemWidth();
 
         const BacktestResults *hp_data = &run_control->results;
         // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); each axis checked on its own,
         // so two inverted ranges can no longer multiply to an in-range count
         const SuiteGate hp_gate =
-            StartGate_HyperparamSweep(START_GATE_BUILD_TRAINS, state->hp_ranges[0].steps(),
-                                      state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1, OPT_MAX_GRID,
-                                      hp_data->sample_count);
+            StartGate_HyperparamSweep(START_GATE_BUILD_TRAINS, state->hp_num_params, OPT_MAX_PARAMS,
+                                      state->hp_ranges[0].steps(),
+                                      state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1, OPT_MAX_STEPS,
+                                      OPT_MAX_GRID, hp_data->sample_count);
         const bool can_hp = SuiteGate_Open(&hp_gate);
 
         if (SuiteJob_Running(&state->hp_job)) {
@@ -6152,7 +6293,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 // every cell on mismatched label semantics.
                 hp_args->snap_label_type = run_control->run_config.label_type;
                 hp_args->snap_wf_n_splits = state->wf_n_splits;
-                hp_args->snap_wf_horizon_ticks = Training_ResolvePurgeHorizon(state);   // s5 leaf-16
+                hp_args->snap_wf_horizon_ticks = Training_ResolvePurgeForLabels(state, &run_control->run_config, hp_data);   // s5 leaf-16 + A2
                 hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
                 hp_args->snap_wf_min_train = state->wf_min_train;
                 auto *heap = (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
@@ -6175,14 +6316,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         // Results table — kind-aware (WF metric: accuracy or correlation)
         if (SuiteJob_Done(&state->hp_job) && state->hp_results.total_runs > 0) {
+            // the keys the sweep recorded, never the live Key inputs above — editable after a sweep (D-507)
             const OptimizerResults *opt = &state->hp_results;
             ImGui::Separator();
             ImGui::Text("Best cell: %s=%.3f",
-                        state->hp_ranges[0].key,
+                        opt->keys[0],
                         opt->param_vals[0][opt->best_idx / opt->dims[1]]);
             if (opt->num_params > 1) {
                 ImGui::SameLine();
-                ImGui::Text(" %s=%.3f", state->hp_ranges[1].key,
+                ImGui::Text(" %s=%.3f", opt->keys[1],
                             opt->param_vals[1][opt->best_idx % opt->dims[1]]);
             }
             ImGui::Text("Metric (val accuracy or correlation): %.4f",
@@ -6194,10 +6336,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (ImGui::BeginTable("hp_sweep_results",
                                    opt->num_params == 1 ? 3 : 4, flags)) {
                 ImGui::TableSetupColumn("Cell", ImGuiTableColumnFlags_WidthFixed, 50);
-                ImGui::TableSetupColumn(state->hp_ranges[0].key,
+                ImGui::TableSetupColumn(opt->keys[0],
                                          ImGuiTableColumnFlags_WidthFixed, 120);
                 if (opt->num_params > 1) {
-                    ImGui::TableSetupColumn(state->hp_ranges[1].key,
+                    ImGui::TableSetupColumn(opt->keys[1],
                                              ImGuiTableColumnFlags_WidthFixed, 120);
                 }
                 ImGui::TableSetupColumn("Metric",
@@ -6260,9 +6402,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "unsigned loads.");
 
         const BacktestResults *fv_data = &run_control->results;
-        // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503)
+        // its gate (D-507; Backtest/SuiteStartGates.hpp) — one run at a time (D-503); the model must be of the collected
+        // labels' horizon (R1). The labels' horizon is read from the run's record only while the lease is free: a worker
+        // writes the record under the lease, and this thread is the only one that takes it — busy, both horizons pass
+        // as unknown and the gate's lease term says why; a run that collected no samples has no labels' horizon
+        const bool fv_lease_free = !SuiteLease_Busy();
+        const BacktestRunConfig *fv_rec = &run_control->run_config;
         const SuiteGate fv_gate =
-            StartGate_FullValidation(START_GATE_BUILD_TRAINS, state->model_path[0] != '\0', fv_data->sample_count);
+            StartGate_FullValidation(START_GATE_BUILD_TRAINS, state->model_path[0] != '\0',
+                                     fv_lease_free ? ModelPath_HorizonOfModelFile(state->model_path) : -1,
+                                     fv_lease_free ? BacktestRunConfig_LabelsHorizon(fv_rec, fv_data->sample_count) : 0,
+                                     fv_data->sample_count);
         const bool can_fv = SuiteGate_Open(&fv_gate);
 
         if (SuiteJob_Running(&state->fv_job)) {

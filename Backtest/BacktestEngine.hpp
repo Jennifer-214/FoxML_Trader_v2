@@ -10,11 +10,15 @@
 // [OVERVIEW]_[the backtest training + validation harness — CSV loader, BacktestResults buffers, the Backtest_Run wrapper (delegates replay to BacktestSharded_Run), the forward-scan label post-pass, walk-forward + held-out XGBoost validation, and the parameter/hyperparam optimizer]
 // [CONTAINS]
 //   - [FUNCTION]_[BacktestData_Load] · [FUNCTION]_[BacktestData_ValidateSort]
-//   - [STRUCT]_[BacktestRunConfig] · [STRUCT]_[BacktestStats] · [STRUCT]_[BacktestResults]
+//   - [STRUCT]_[BacktestRunConfig] · [STRUCT]_[BacktestLabelRequest] · [FUNCTION]_[BacktestRunConfig_FromSelection]
+//   - [FUNCTION]_[BacktestRunConfig_RecordLabels] · [FUNCTION]_[BacktestRunConfig_LabelsHorizon]
+//   - [FUNCTION]_[Label_EffectiveForwardTicks] · [FUNCTION]_[Label_PurgeCovering]
+//   - [STRUCT]_[BacktestStats] · [STRUCT]_[BacktestResults]
 //   - [FUNCTION]_[Backtest_ComputeLabelsFromSamples] · [FUNCTION]_[Backtest_Run]
 //   - [STRUCT]_[WalkForwardResults] · [STRUCT]_[FullValidationResults]
 //   - [FUNCTION]_[Backtest_RunFullValidation] · [FUNCTION]_[Backtest_RunWalkForward] · [FUNCTION]_[HeldOutSplit_TrainEval]
 //   - [FUNCTION]_[ConfigField_Set] · [FUNCTION]_[Backtest_RunSweep] · [FUNCTION]_[Backtest_RunHyperparamTrainSweep]
+//   - [FUNCTION]_[OptimizerResults_RecordKeys] · [FUNCTION]_[OptimizerGrid_Fits]
 //======================================================================================================
 // The backtest harness. Historical tick replay itself lives in
 // BacktestSharded.hpp (the per-core architecture); Backtest_Run here is a thin
@@ -49,6 +53,7 @@
 #include "OverfitDetection.hpp"
 #include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
 #include "SuiteLease.hpp"   // E.1.3 MP-6 — Backtest_Run runs only for the holder of the suite run lease (D-503)
+#include "SuiteStartGates.hpp"   // D-507 — the ONE grid rule both sweeps refuse on (StartGate_GridFits), the gates' too
 #include "../MemHeaders/HmacSha256.hpp"  // 2026-09-03 — tt::sha256_bytes_hex for the corpus-selection record
 #include <stdio.h>
 #include <stdlib.h>
@@ -279,6 +284,81 @@ struct BacktestRunConfig {
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[BacktestRunConfig]
+//======================================================================
+
+//======================================================================
+// [STRUCT]_[BacktestLabelRequest]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the label params a collect asks for — the BacktestRunConfig fields a collect fills and a plain backtest leaves zero; named fields, so a take-profit and a stop-loss can never trade places in an argument list]
+//======================================================================
+// [CODE]
+//======================================================================
+struct BacktestLabelRequest {
+    int      label_type;
+    int      forward_ticks;
+    double   tp_pct;
+    double   sl_pct;
+    double   roundtrip_fee_pct;
+    uint64_t feature_mask;   // 0 = all features on (normalized at every consumer — see BacktestRunConfig)
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-10-02]
+//----------------------------------------------------------------------
+// [SIZE]_[40B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[1]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[BacktestLabelRequest]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BacktestRunConfig_FromSelection]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE request a suite run starts from: the selected files in scan order (only the files the scan found, at most MAX_DATA_FILES), the cfg path, the bandit prior, and — for a collect — its label params; the request is zeroed first, so nothing a caller's buffer held survives into it; never written into a panel's state; returns the number of files]
+//======================================================================
+// A start click builds this into its worker's own args; the worker, holding the lease, makes it the run's record — so a
+// start that is refused or fails to start changes nothing shared (D-507). Every Run Control run uses the bandit prior the
+// panel shows; a collect used to inherit whatever the last Run Backtest had left in the shared record.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int BacktestRunConfig_FromSelection(BacktestRunConfig* out, const char (*files)[256],
+                                                  const bool* selected, int file_count, int capacity,
+                                                  const char* config_path, const char* bandit_prior,
+                                                  const BacktestLabelRequest* collect) {
+    memset(out, 0, sizeof(*out));   // a reused buffer's stale paths / label params / override never reach a run
+    const int n = file_count < capacity ? file_count : capacity;
+    for (int i = 0; files && selected && i < n && out->num_data_files < MAX_DATA_FILES; i++) {
+        if (!selected[i]) continue;
+        strncpy(out->data_paths[out->num_data_files++], files[i], 255);   // byte 255 stays the memset's 0
+    }
+    snprintf(out->config_path, sizeof(out->config_path), "%s", config_path ? config_path : "");
+    snprintf(out->bandit_state_prior_path, sizeof(out->bandit_state_prior_path), "%s",
+             bandit_prior ? bandit_prior : "");
+    out->collect_features = collect ? 1 : 0;
+    if (collect) {
+        out->label_type              = collect->label_type;
+        out->label_forward_ticks     = collect->forward_ticks;
+        out->label_tp_pct            = collect->tp_pct;
+        out->label_sl_pct            = collect->sl_pct;
+        out->label_roundtrip_fee_pct = collect->roundtrip_fee_pct;
+        out->feature_mask            = collect->feature_mask;
+    }
+    return out->num_data_files;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestRunConfig_FromSelection]
 //======================================================================
 
 //======================================================================
@@ -946,7 +1026,7 @@ struct LabelBatchTarget {
     double sl_pct;          // 0 → resolved per the row's sl_kind (D-473); NOT a blanket 1.0
     float *out_labels;      // caller-owned, >= results->sample_count floats
     int    label_type;      // LABEL_* id; unknown → Label_WinLoss fallback (parity with single-target)
-    int    forward_ticks;   // 0 → 1000 default; LABEL_REGIME ignores (per-sample regime drives)
+    int    forward_ticks;   // 0 → LABEL_DEFAULT_FORWARD_TICKS; LABEL_REGIME ignores (per-sample regime drives)
     // Per-target NaN accounting, THIS pass only. Deliberately NOT
     // results->stats: the legacy counters accumulate across passes and are
     // mode-dependent (S3-F3, E.1.2.D leaf 13) — callers that want the legacy
@@ -971,6 +1051,97 @@ struct LabelBatchTarget {
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[LabelBatchTarget]
+//======================================================================
+
+// The horizon a label target of forward_ticks 0 is labelled at — the label pass's default, named once.
+static constexpr int LABEL_DEFAULT_FORWARD_TICKS = 1000;
+
+//======================================================================
+// [FUNCTION]_[Label_EffectiveForwardTicks]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the horizon a label request actually labels at — its own when positive, else the label pass's default (LABEL_DEFAULT_FORWARD_TICKS); the pass, Full Validation's gate and the panel's defaults read this one rule]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Label_EffectiveForwardTicks(int forward_ticks) {
+    return forward_ticks > 0 ? forward_ticks : LABEL_DEFAULT_FORWARD_TICKS;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_EffectiveForwardTicks]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[Label_PurgeCovering]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the walk-forward purge that covers the labels a run trains on — an AUTO purge widened to the collected labels' horizon when that is longer; an explicit operator purge verbatim; labels_horizon <= 0 = none to cover]
+//======================================================================
+// The t+1 label contract: the purge must cover the labels' lookahead. The auto purge is resolved from the panel's
+// Horizons CSV, which the operator can edit after a collect — shrinking it under longer labels leaked (D-507 third
+// review, A2). An explicit purge stays s5 leaf-16's deliberate escape hatch.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int Label_PurgeCovering(int resolved, bool explicit_override, int labels_horizon) {
+    return (explicit_override || labels_horizon <= resolved) ? resolved : labels_horizon;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[Label_PurgeCovering]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BacktestRunConfig_LabelsHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the horizon a run's collected labels were made with, read from its record — 0 when it made none to compare (it collected nothing, or its collect produced no samples: a refused cfg, a failed allocation)]
+//======================================================================
+// Full Validation's gate and the walk-forward purge read it (D-507 third review, A2 / A3). The record is written by the
+// run's worker under the lease: read it at a click, or only while the lease is free.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline int BacktestRunConfig_LabelsHorizon(const BacktestRunConfig* rec, int sample_count) {
+    return (rec && rec->collect_features && sample_count > 0) ? Label_EffectiveForwardTicks(rec->label_forward_ticks) : 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestRunConfig_LabelsHorizon]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[BacktestRunConfig_RecordLabels]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [ML]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[make a run's record describe the labels its results hold: the label params of the target a label pass wrote into results.labels (kind, forward ticks, take-profit, stop-loss); the fee and the feature mask are the pass's own, unchanged]
+//======================================================================
+// Full Validation, Walk-Forward and the HP sweep take the labels' identity from the run's record (TrainingWorkers_
+// FvRequestIdentity) and train on results.labels; a multi-horizon collect's batch leaves the LAST horizon's labels there
+// while the record still held the click's position-0 params — so a signed stamp could name a horizon and barriers its
+// labels were never made with (D-507 review F1). Until MP-3a's labels carry their own params, the pass that writes them
+// records them here.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void BacktestRunConfig_RecordLabels(BacktestRunConfig* record, const LabelBatchTarget* wrote) {
+    record->label_type          = wrote->label_type;
+    record->label_forward_ticks = wrote->forward_ticks;
+    record->label_tp_pct        = wrote->tp_pct;
+    record->label_sl_pct        = wrote->sl_pct;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestRunConfig_RecordLabels]
 //======================================================================
 
 //======================================================================
@@ -1172,7 +1343,7 @@ static inline int Backtest_ComputeLabelsBatch(BacktestResults *results,
         // and every sample fell to class 0. It also made the leaf's own
         // LABEL_VOL_WINDOW_DEFAULT unreachable by replacing the 0 first.
         rt[t].sl  = Label_ResolveEffectiveSl(targets[t].label_type, targets[t].sl_pct);
-        rt[t].fwd = targets[t].forward_ticks > 0 ? targets[t].forward_ticks : 1000;
+        rt[t].fwd = Label_EffectiveForwardTicks(targets[t].forward_ticks);
         rt[t].is_multiclass = LabelType_IsMulticlass(targets[t].label_type);
         rt[t].is_regression = LabelType_IsRegression(targets[t].label_type);
         rt[t].is_regime     = (targets[t].label_type == LABEL_REGIME);
@@ -3718,7 +3889,14 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
 struct OptimizerRange {
     char key[32];
     double lo, hi, step;
-    int steps() const { return (step > 1e-12) ? (int)((hi - lo) / step) + 1 : 1; }
+    // no step: the one value lo. An inverted axis (or a NaN bound) has no steps — the gates say so. A count past any
+    // grid saturates instead of converting an out-of-range double to int (undefined): the grid rule refuses it.
+    int steps() const {
+        if (!(step > 1e-12)) return 1;
+        const double n = (hi - lo) / step;
+        if (!(n >= 0.0)) return 0;
+        return n >= 2147483646.0 ? 2147483647 : (int)n + 1;
+    }
 };
 //======================================================================
 // [END_CODE]
@@ -3745,7 +3923,55 @@ struct OptimizerResults {
     // Grid Search: 1 = this cell's backtest ran and its stats + metric are recorded; 0 = it did not run (refused,
     // failed, or never reached) — the panel shows it as not run and it can never be the best (MP-6, D-503)
     uint8_t cell_ran[OPT_MAX_GRID];
+    // the keys the sweep swept, recorded at its start by both sweeps (OptimizerResults_RecordKeys) — a results table,
+    // its axes and its best line read these, never the panel's live inputs, which can change after the sweep (D-507)
+    char keys[OPT_MAX_PARAMS][32];
+    // Grid Search: the metric it ranked by (OPT_METRIC_*), recorded with the keys. The HP sweep ranks by its
+    // validation score and leaves this 0 — its panel names that metric itself
+    int  metric_idx;
 };
+
+//======================================================================
+// [FUNCTION]_[OptimizerResults_RecordKeys]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[record the keys a sweep is about into its results — the swept ones, and "" past num_params so no stale axis name survives; bounded: a key filling its array has no NUL to stop at. Both sweeps' ONE copy]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void OptimizerResults_RecordKeys(OptimizerResults *opt, const OptimizerRange *ranges, int num_params) {
+    for (int k = 0; k < OPT_MAX_PARAMS; k++)
+        snprintf(opt->keys[k], sizeof(opt->keys[k]), "%.*s", (int)sizeof(ranges[k].key) - 1,
+                 k < num_params ? ranges[k].key : "");
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OptimizerResults_RecordKeys]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[OptimizerGrid_Fits]
+//----------------------------------------------------------------------
+// [TAG]_[[BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[can a sweep's results hold this grid — 1..OPT_MAX_PARAMS axes, each 1..OPT_MAX_STEPS steps (param_vals' rows), at most OPT_MAX_GRID cells (the per-cell arrays): the start gates' ONE rule (StartGate_NeedGrid, the axis count included), so a caller that skips the gate is refused the same way; no ranges at all do not fit]
+//======================================================================
+// Both gates once capped only the product: a single 143-step axis passed and both sweeps wrote param_vals past its
+// 50-wide row into the dims, the recorded keys and — past 424 steps — the panel's SuiteJob (D-507 review F2).
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool OptimizerGrid_Fits(const OptimizerRange *ranges, int num_params) {
+    return ranges && StartGate_GridFits(num_params, OPT_MAX_PARAMS, ranges[0].steps(),
+                                        num_params > 1 ? ranges[1].steps() : 1, OPT_MAX_STEPS, OPT_MAX_GRID);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[OptimizerGrid_Fits]
+//======================================================================
 
 // metric selector
 #define OPT_METRIC_SHARPE      0
@@ -3794,7 +4020,14 @@ static inline void Backtest_RunSweep(uint64_t lease,
         fprintf(stderr, "[optimizer] REFUSED: the caller does not hold the suite run lease — no cell runs\n");
         return;
     }
+    if (!OptimizerGrid_Fits(ranges, num_params)) {   // before the results are touched — the last sweep's stand
+        fprintf(stderr, "[optimizer] REFUSED: the grid does not fit the results (each axis 1..%d steps, at most %d "
+                        "cells) — no cell runs\n", OPT_MAX_STEPS, OPT_MAX_GRID);
+        return;
+    }
     opt->num_params = num_params;
+    OptimizerResults_RecordKeys(opt, ranges, num_params);   // what this sweep is about, recorded with it (D-507)
+    opt->metric_idx = metric_idx;
     opt->dims[0] = ranges[0].steps();
     opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
     opt->total_runs = opt->dims[0] * opt->dims[1];
@@ -3945,7 +4178,13 @@ static inline void Backtest_RunHyperparamTrainSweep(
     volatile int *current_run, volatile int *total_runs,
     volatile int *cancel_flag) {
 
+    if (!OptimizerGrid_Fits(ranges, num_params)) {   // before the results are touched (D-507 review F2)
+        fprintf(stderr, "[hpsweep] REFUSED: the grid does not fit the results (each axis 1..%d steps, at most %d "
+                        "cells) — no cell runs\n", OPT_MAX_STEPS, OPT_MAX_GRID);
+        return;
+    }
     opt->num_params = num_params;
+    OptimizerResults_RecordKeys(opt, ranges, num_params);   // its table and best line read these (D-507)
     opt->dims[0] = ranges[0].steps();
     opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
     opt->total_runs = opt->dims[0] * opt->dims[1];

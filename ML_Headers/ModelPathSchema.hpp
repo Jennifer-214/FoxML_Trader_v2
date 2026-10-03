@@ -117,6 +117,38 @@ static inline void ModelPath_HorizonDir(char* buf, size_t buf_size,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[ModelPath_HorizonOfModelFile]
+//----------------------------------------------------------------------
+// [TAG]_[[ML_INFERENCE] [GUI] [BACKTEST]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the horizon a model FILE belongs to — its parent directory parsed by the ONE horizon-child matcher (`.../horizon_<N>/<role>.json` → N); -1 when the path names no horizon directory (a flat or legacy path, no directory, an aliased spelling)]
+//======================================================================
+// Full Validation's gate compares it with the collected labels' horizon (D-507): a model of another horizon would be
+// scored on labels it never predicted and re-stamped with a horizon it was never trained on.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline long ModelPath_HorizonOfModelFile(const char* path) {
+    if (!path) return -1;
+    const char* file = strrchr(path, '/');
+    if (!file) return -1;                                 // a bare file name: no parent in the path
+    const char* dir = file;
+    while (dir > path && dir[-1] != '/') --dir;          // the parent's first character
+    char name[32];
+    const size_t n = (size_t)(file - dir);
+    if (n >= sizeof(name)) return -1;                     // longer than any horizon_<N> the matcher accepts
+    // (an empty parent — a file at the root, `//` — reaches the matcher as "" and is no horizon: -1)
+    memcpy(name, dir, n);
+    name[n] = '\0';
+    return ModelPath_ParseHorizonChild(name);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelPath_HorizonOfModelFile]
+//======================================================================
+
+//======================================================================
 // [SECTION]_[old-flat-form detection (transitional, LOUD)]
 //----------------------------------------------------------------------
 // The RETIRED pre-D-431 form was `<family>_horizon_<N>` as a SIBLING of

@@ -110,6 +110,56 @@ static inline void CandleAccumulator_Init(CandleAccumulator *ca, int interval_se
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[CandleAccumulator_ClearLocked]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[what a clear forgets — every candle and the VWAP; the caller holds the accumulator's mutex. Reset's and SetInterval's ONE copy]
+//======================================================================
+// The ring's slots are not cleared: Snapshot reads only the count it holds, from slot 0 until the ring is full — so the
+// write position goes back to 0 with the count (a stale head would land the next candles past where Snapshot starts
+// reading). The in-progress candle needs no clear: the first push after has_current = 0 writes every field of it.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void CandleAccumulator_ClearLocked(CandleAccumulator *ca) {
+    ca->head        = 0;
+    ca->count       = 0;
+    ca->has_current = 0;
+    ca->vwap_pv     = 0.0;
+    ca->vwap_vol    = 0.0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_ClearLocked]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[CandleAccumulator_Reset]
+//----------------------------------------------------------------------
+// [TAG]_[[GUI] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[forget every candle under the accumulator's own mutex — the interval and the mutex stay; a run starts here, not with a second Init]
+//======================================================================
+// The suite's Run Control clicks used to call CandleAccumulator_Init to clear the chart: a memset of the whole accumulator
+// and a second pthread_mutex_init on a mutex already in use (undefined by POSIX), while the GUI thread snapshots it every
+// frame. A run's worker resets it here instead, holding the lease and the mutex, before its first push (D-507).
+//======================================================================
+// [CODE]
+//======================================================================
+static inline void CandleAccumulator_Reset(CandleAccumulator *ca) {
+    pthread_mutex_lock(&ca->lock);
+    CandleAccumulator_ClearLocked(ca);
+    pthread_mutex_unlock(&ca->lock);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[CandleAccumulator_Reset]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[CandleAccumulator_Push]
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [CONCURRENCY]]
@@ -307,11 +357,7 @@ static inline void CandleAccumulator_Snapshot(CandleAccumulator *ca, CandleSnaps
 static inline void CandleAccumulator_SetInterval(CandleAccumulator *ca, int interval_sec) {
     pthread_mutex_lock(&ca->lock);
     ca->interval_sec = interval_sec;
-    ca->head = 0;
-    ca->count = 0;
-    ca->has_current = 0;
-    ca->vwap_pv = 0;
-    ca->vwap_vol = 0;
+    CandleAccumulator_ClearLocked(ca);
     pthread_mutex_unlock(&ca->lock);
 }
 //======================================================================
