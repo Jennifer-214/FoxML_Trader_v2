@@ -3507,7 +3507,9 @@ struct TrainingPanelState {
     int label_forward_ticks;
     // results
     char model_path[256];
-    char status_msg[128];
+    // the training run's status line — the run (its sink) writes it, the GUI reads it through TrainingStatusLine_Read:
+    // a published snapshot, never torn while the run rewrites it (E.1.3 MP-6 step 10, S1-F10's sibling)
+    TrainingStatusLine run_status;
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     // s5 leaf-16: 0 = AUTO (max of the Horizons CSV, resolved at every use via
@@ -3532,7 +3534,7 @@ struct TrainingPanelState {
     char fv_auto_stamp_secret[128];   // HMAC secret; empty = the collected cfg's auto_stamp_secret, dev mode only when that is empty too (CS-277)
     float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
     float fv_gap_threshold;           // gap threshold for stamp accept/refuse
-    char fv_status_msg[256];          // post-run summary + auto-stamp result
+    TrainingStatusLine fv_status;     // post-run summary + auto-stamp result (the job writes it; read through TrainingStatusLine_Read)
     // v5.10.0a.E — Hyperparam Sweep state. Mirrors the wf_* worker
     // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
     // calls Backtest_RunHyperparamTrainSweep using already-collected
@@ -3582,7 +3584,7 @@ struct TrainingPanelState {
     int             ui_sl_per_horizon_count;
     // v5.11.41 — the per-horizon display of a multi-horizon run (one row per horizon, max
     // PANEL_HORIZON_MAX). The run (TrainingWorkers_RunMultiHorizon) writes these as its sink:
-    // mh_horizon_status[h] is the live row text, mh_horizon_progress[h] the horizon's WF + held-out %
+    // mh_horizon_status[h] is the live row text (read as a snapshot), mh_horizon_progress[h] the horizon's WF + held-out %
     // (0..100), and mh_horizon_complete[h] = 1 (release-published, read with TrainingSink_Load) once
     // that horizon finished or failed, after every file it writes. The FullValidationResults
     // themselves are no longer kept here: no panel code read them, and the run returns them in its
@@ -3591,10 +3593,11 @@ struct TrainingPanelState {
     // construction, so a field added or deleted above can never walk them across a line again.
     alignas(64) volatile int mh_horizon_complete[PANEL_HORIZON_MAX];
     alignas(64) volatile int mh_horizon_progress[PANEL_HORIZON_MAX];  // H6 (Stage-5.5): cross-thread, was straddling a line
-    // 256B per row (was 128B, which clipped the skill-floor refuse reason
+    // 256B per row with its sequence, 248 of text (was 128B, which clipped the skill-floor refuse reason
     // mid-word — "classification: majo" — hiding the operative half of the
-    // message; the REFUSED format + full refuse string need ~200B headroom)
-    char                   mh_horizon_status[PANEL_HORIZON_MAX][256];
+    // message; the REFUSED format + full refuse string need ~200B headroom). A TrainingStatusLine: the
+    // jobs rewrite a row while the GUI shows it, so the GUI reads a snapshot (S1-F10 — E.1.3 MP-6 step 10)
+    TrainingStatusLine     mh_horizon_status[PANEL_HORIZON_MAX];
     // E.1.2.C GUI polish (a) — click-time snapshot of the run's horizon
     // ticks for the per-horizon results table. The live ui_horizon_list
     // re-parses ui_horizon_csv EVERY frame, so reading it from the table
@@ -3638,9 +3641,9 @@ static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment
 // [DERIVED]
 // [ORIGIN]_[AUTO]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[412288B]
+// [SIZE]_[412416B]
 // [ALIGN]_[64]
-// [CACHE_LINES]_[6442]
+// [CACHE_LINES]_[6444]
 // [STRADDLE]_[none]
 //======================================================================
 // [END_STRUCT]_[TrainingPanelState]
@@ -3876,7 +3879,6 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->fv_auto_stamp_secret[0] = '\0';   // empty = the collected cfg's secret, dev mode only if that is empty too (CS-277)
     state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
     state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
-    state->fv_status_msg[0] = '\0';
     // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
     // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
     strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
@@ -4133,10 +4135,9 @@ static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
     TrainingPanelState *state = args->state;
     // the job's status line clears HERE, under the lease — a refused click never reaches it, so the last run's
     // summary stays beside its results (MP-6 step 8)
-    state->fv_status_msg[0] = '\0';
+    TrainingStatusLine_Set(&state->fv_status, "");
     TrainingFvSink sink{};
-    sink.status     = state->fv_status_msg;
-    sink.status_cap = sizeof(state->fv_status_msg);
+    sink.status     = &state->fv_status;
     sink.progress   = &state->fv_job.progress;
     sink.cancel     = &state->fv_job.cancel;
     sink.complete   = &state->fv_job.complete;
@@ -4394,12 +4395,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     TrainingPanelState *state = args->state;
     // the job's display that SuiteJob does not hold resets HERE, under the lease (the core clears the per-horizon
     // rows and holds the run's total at 0 until it accepts the run) — a refused click never reaches it (MP-6 step 8)
-    state->status_msg[0]      = '\0';
+    TrainingStatusLine_Set(&state->run_status, "");
     state->mh_current_horizon = 0;
 
     TrainingRunSink sink{};
-    sink.status     = state->status_msg;
-    sink.status_cap = sizeof(state->status_msg);
+    sink.status     = &state->run_status;
     sink.cancel     = &state->mh_job.cancel;
     sink.total      = &state->mh_job.total;
     sink.current    = &state->mh_current_horizon;
@@ -4408,8 +4408,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
                                  // mh_horizon_complete[h] — the D-504 trace found mh_complete write-only (D-505: NULL)
     sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
-        sink.horizon[h].status     = state->mh_horizon_status[h];
-        sink.horizon[h].status_cap = sizeof(state->mh_horizon_status[h]);
+        sink.horizon[h].status     = &state->mh_horizon_status[h];
         sink.horizon[h].progress   = &state->mh_horizon_progress[h];
         sink.horizon[h].complete   = &state->mh_horizon_complete[h];
     }
@@ -4418,8 +4417,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     // sink's status lines, so the result is released once the run is done.
     TrainingRunResult *result = TrainingWorkers_AllocZeroed<TrainingRunResult>();
     if (!result) {
-        TrainingSink_Status(sink.status, sink.status_cap,
-                            "Multi-horizon: out of memory (run result).");
+        TrainingSink_Status(sink.status, "Multi-horizon: out of memory (run result).");
         TrainingSink_FinishRun(sink);
     } else {
         TrainingWorkers_RunMultiHorizon(args->req, sink, result);
@@ -5818,8 +5816,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 }
 
                 ImGui::TableNextColumn();
-                if (state->mh_horizon_status[h][0] != '\0') {
-                    ImGui::TextWrapped("%s", state->mh_horizon_status[h]);
+                char row_text[sizeof(TrainingStatusLine::text)];   // a snapshot — the row's job may be rewriting it
+                if (TrainingStatusLine_Read(&state->mh_horizon_status[h], row_text, sizeof(row_text)) && row_text[0]) {
+                    ImGui::TextWrapped("%s", row_text);
                 } else {
                     ImGui::TextDisabled("--");
                 }
@@ -5836,9 +5835,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // HEAD (S1-F8, the Class-44 shape). The MH results table above is the live
     // results view; the one living signal (the completion status line) now
     // renders whenever it has content:
-    if (state->status_msg[0]) {
+    char run_text[sizeof(TrainingStatusLine::text)];   // a snapshot — the run may be rewriting it
+    if (TrainingStatusLine_Read(&state->run_status, run_text, sizeof(run_text)) && run_text[0]) {
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
+        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", run_text);
     }
 
     //==================================================================
@@ -6482,12 +6482,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // report bug)") ran off the panel right edge on 1080p. Use
         // PushStyleColor + TextWrapped instead of TextColored so the
         // text wraps at panel width with color preserved.
-        if (state->fv_status_msg[0]) {
+        char fv_text[sizeof(TrainingStatusLine::text)];
+        if (TrainingStatusLine_Read(&state->fv_status, fv_text, sizeof(fv_text)) && fv_text[0]) {
             ImVec4 stamp_col = fv->auto_stamp_attempted && fv->auto_stamp_ok
                 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
                 : ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Text, stamp_col);
-            ImGui::TextWrapped("%s", state->fv_status_msg);
+            ImGui::TextWrapped("%s", fv_text);
             ImGui::PopStyleColor();
         }
     }

@@ -6,6 +6,9 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code]
 // [CONTAINS]
+//   - [STRUCT]_[TrainingStatusLine]
+//   - [FUNCTION]_[TrainingStatusLine_Set]
+//   - [FUNCTION]_[TrainingStatusLine_Read]
 //   - [STRUCT]_[TrainingHorizonSink]
 //   - [STRUCT]_[TrainingHorizonDisplay]
 //   - [STRUCT]_[TrainingRunSink]
@@ -73,7 +76,106 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdio.h>    // snprintf / vsnprintf — the status lines
+#include <string.h>   // memcpy — TrainingStatusLine_Read
 #include <time.h>
+
+//======================================================================
+// [STRUCT]_[TrainingStatusLine]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST] [CONCURRENCY]]
+// [THREAD]_[[WORKER_WRITER] [GUI_READER]]
+// [SYNC]_[SEQ_LOCK]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a line of display text one thread writes while another reads it — a seqlock: the writer makes the sequence odd, writes, makes it even; a reader copies between two equal, even reads of it, so it never shows a line half old and half new (Class 63: a multi-word value crosses threads only as a published snapshot)]
+//======================================================================
+// The house seqlock's protocol (CoreFrameworks/ParameterSlot.hpp, the SSoT) on a plain struct, in the suite's __atomic
+// idiom — the suite's display states are memset-initialised, which a std::atomic member forbids — and with one buffer:
+// a status line changes a few times per run, so a reader that meets a write retries (bounded: the GUI thread never
+// spins for long) instead of reading a second copy. ONE writer at a time: the run's orchestrator writes a horizon's line
+// only before that horizon's job exists, the job afterwards — the pool's hand-off orders them (E.1.3 MP-6 step 10,
+// closing S1-F10: the GUI read the per-horizon text every frame while the jobs wrote it).
+//======================================================================
+// [CODE]
+//======================================================================
+struct TrainingStatusLine {
+    uint64_t seq;        // even = stable, odd = a write in progress — written only by the line's one writer
+    char     text[248];  // NUL-terminated; 256 B with the sequence
+};
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [DERIVED]
+// [ORIGIN]_[AUTO]
+// [UPDATED]_[2026-10-03]
+//----------------------------------------------------------------------
+// [SIZE]_[256B]
+// [ALIGN]_[8]
+// [CACHE_LINES]_[4]
+// [STRADDLE]_[none]
+//======================================================================
+// [END_STRUCT]_[TrainingStatusLine]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingStatusLine_Set]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the writer — the sequence goes odd before the first byte changes and even after the last (two fences around a plain copy, as ParameterSlot_Write); NULL line = not displayed]
+//======================================================================
+// [CODE]
+//======================================================================
+__attribute__((no_sanitize("thread")))   // the copy races a reader BY DESIGN — the sequence detects it (ParameterSlot's note)
+inline void TrainingStatusLine_Set(TrainingStatusLine* line, const char* text) {
+    if (!line) return;
+    const uint64_t s = __atomic_load_n(&line->seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&line->seq, s + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);   // the odd sequence before any byte of the new text
+    snprintf(line->text, sizeof(line->text), "%s", text ? text : "");
+    __atomic_store_n(&line->seq, s + 2, __ATOMIC_RELEASE);   // every byte of the new text before the even sequence
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingStatusLine_Set]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[TrainingStatusLine_Read]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the reader — a copy taken between two equal, even reads of the sequence, or false after TRAINING_STATUS_LINE_TRIES writes in a row met it (the caller shows nothing new that frame, never a torn line); out always NUL-terminated]
+//======================================================================
+// [CODE]
+//======================================================================
+static constexpr int TRAINING_STATUS_LINE_TRIES = 1024;   // a write is a short snprintf: far past any one write
+__attribute__((no_sanitize("thread")))
+inline bool TrainingStatusLine_Read(const TrainingStatusLine* line, char* out, size_t cap) {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!line) return false;
+    for (int i = 0; i < TRAINING_STATUS_LINE_TRIES; ++i) {
+        const uint64_t s1 = __atomic_load_n(&line->seq, __ATOMIC_ACQUIRE);
+        if (s1 & 1u) {
+            __builtin_ia32_pause();
+            continue;
+        }
+        const size_t n = cap < sizeof(line->text) ? cap : sizeof(line->text);
+        memcpy(out, line->text, n);
+        out[n - 1] = '\0';
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);   // the copy before the second read of the sequence
+        if (__atomic_load_n(&line->seq, __ATOMIC_RELAXED) == s1) return true;
+    }
+    out[0] = '\0';
+    return false;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingStatusLine_Read]
+//======================================================================
 
 //======================================================================
 // [STRUCT]_[TrainingHorizonSink]
@@ -85,8 +187,7 @@
 // [CODE]
 //======================================================================
 struct TrainingHorizonSink {
-    char*         status;                // the horizon's status line (NULL = not displayed)
-    size_t        status_cap;
+    TrainingStatusLine* status;          // the horizon's status line (NULL = not displayed)
     volatile int* progress;              // 0..100, written by the validation pass
     volatile int* complete;              // published (release) LAST, after every file the horizon writes
     volatile int* cancel;                // READ — under the orchestrator, the run's cancel
@@ -95,8 +196,8 @@ struct TrainingHorizonSink {
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[40B]
+// [UPDATED]_[2026-10-03]
+// [SIZE]_[32B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -115,8 +216,7 @@ struct TrainingHorizonSink {
 // [CODE]
 //======================================================================
 struct TrainingHorizonDisplay {
-    char*         status;
-    size_t        status_cap;
+    TrainingStatusLine* status;
     volatile int* progress;
     volatile int* complete;
 };
@@ -124,8 +224,8 @@ struct TrainingHorizonDisplay {
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[32B]
+// [UPDATED]_[2026-10-03]
+// [SIZE]_[24B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -144,8 +244,7 @@ struct TrainingHorizonDisplay {
 // [CODE]
 //======================================================================
 struct TrainingRunSink {
-    char*               status;          // the run's status line
-    size_t              status_cap;
+    TrainingStatusLine* status;          // the run's status line
     volatile int*       cancel;          // READ — the operator's cancel
     volatile int*       total;           // N
     volatile int*       current;         // the horizon in progress (ticks)
@@ -158,10 +257,10 @@ struct TrainingRunSink {
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[320B]
+// [UPDATED]_[2026-10-03]
+// [SIZE]_[248B]
 // [ALIGN]_[8]
-// [CACHE_LINES]_[5]
+// [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
 // [ORIGIN]_[AUTO]
 //======================================================================
@@ -344,11 +443,11 @@ static_assert(alignof(TrainingHorizonJob) == 64,
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [UPDATED]_[2026-09-30]
+// [UPDATED]_[2026-10-03]
 // [SIZE]_[632512B]
 // [ALIGN]_[64]
 // [CACHE_LINES]_[9883]
-// [STRADDLE]_[none]
+// [STRADDLE]_[outcome@632440]
 // [ORIGIN]_[AUTO]
 //======================================================================
 // [END_STRUCT]_[TrainingHorizonJob]
@@ -445,8 +544,7 @@ struct TrainingFvRequest {
 // [CODE]
 //======================================================================
 struct TrainingFvSink {
-    char*         status;
-    size_t        status_cap;
+    TrainingStatusLine* status;
     volatile int* progress;              // 0..100, written by the validation pass
     volatile int* cancel;                // READ
     volatile int* complete;              // published (release) LAST — the panel shows the result once it reads 1 (acquire)
@@ -456,8 +554,8 @@ struct TrainingFvSink {
 // [END_CODE]
 //======================================================================
 // [DERIVED]
-// [UPDATED]_[2026-09-30]
-// [SIZE]_[48B]
+// [UPDATED]_[2026-10-03]
+// [SIZE]_[40B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
@@ -475,13 +573,15 @@ struct TrainingFvSink {
 //======================================================================
 // [CODE]
 //======================================================================
-__attribute__((format(printf, 3, 4)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
-inline void TrainingSink_Status(char* buf, size_t cap, const char* fmt, ...) {
-    if (!buf || cap == 0) return;
+__attribute__((format(printf, 2, 3)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
+inline void TrainingSink_Status(TrainingStatusLine* line, const char* fmt, ...) {
+    if (!line) return;
+    char text[sizeof(line->text)];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, cap, fmt, ap);
+    vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
+    TrainingStatusLine_Set(line, text);   // formatted aside, published whole
 }
 inline int TrainingSink_IsCancelled(volatile int* cancel) {
     return cancel ? __atomic_load_n(cancel, __ATOMIC_RELAXED) : 0;
@@ -507,7 +607,6 @@ inline int TrainingSink_Load(const volatile int* flag) {
 inline TrainingHorizonSink TrainingSink_ForHorizon(const TrainingHorizonDisplay& d, volatile int* cancel) {
     TrainingHorizonSink s{};
     s.status     = d.status;
-    s.status_cap = d.status_cap;
     s.progress   = d.progress;
     s.complete   = d.complete;
     s.cancel     = cancel;
@@ -811,7 +910,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     if (!view || !run_cfg || !result) {
         fprintf(stderr, "[mh-train] horizon %d: missing dataset view, run config or result slot — refused\n",
                 req.horizon_ticks);
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                             "h=%d FAILED: missing dataset view, run config or result slot", req.horizon_ticks);
         TrainingSink_PublishComplete(sink.complete);
         return outcome;
@@ -847,7 +946,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     const int prev_marker = g_wf_marker_horizon;
     g_wf_marker_horizon = horizon_ticks;
 
-    TrainingSink_Status(sink.status, sink.status_cap,
+    TrainingSink_Status(sink.status,
              "h=%d: computing labels...", horizon_ticks);
 
     local_run_cfg->label_forward_ticks = horizon_ticks;
@@ -888,7 +987,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     if (n_valid < 50) {
         fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
                 horizon_ticks, n_valid);
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d FAILED: only %d valid labels (need >= 50)",
                  horizon_ticks, n_valid);
         g_wf_marker_horizon = prev_marker;
@@ -1002,7 +1101,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     // that learned from the most data possible.
 #ifdef USE_XGBOOST
     {
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d: training final model for save+stamp...", horizon_ticks);
 
         // count valid (non-NaN, non-Inf) labels
@@ -1097,7 +1196,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     }
 #endif
 
-    TrainingSink_Status(sink.status, sink.status_cap,
+    TrainingSink_Status(sink.status,
              "h=%d: WF + held-out (%d folds)...",
              horizon_ticks, snap_n_splits);
 
@@ -1141,7 +1240,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     }
 
     if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped%s",
                  horizon_ticks, wf_metric, ho_metric,
                  fv->wf_to_held_out_gap, bal_buf);
@@ -1151,7 +1250,7 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
         // "h=%d OK: … (stamp skipped: %s)" — a refused run read as OK, and the
         // reason clipped at 128B. auto_stamp_error carries the gate's verdict
         // (skill floor / gap gate) or the writer's error.
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d REFUSED: WF=%.3f HO=%.3f gap=%.3f%s — %s",
                  horizon_ticks, wf_metric, ho_metric, fv->wf_to_held_out_gap, bal_buf,
                  fv->auto_stamp_error[0] ? fv->auto_stamp_error
@@ -1160,15 +1259,15 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
         // stamp not requested (auto_stamp_attempted=0: auto_stamp_on_held_out=0
         // in cfg, OR snap was 0 at click time, OR Run Control hasn't loaded a
         // cfg) — validation itself completed; only the stamp was never asked for.
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d OK: WF=%.3f HO=%.3f gap=%.3f%s (no stamp requested: auto_stamp_on_held_out=0)",
                  horizon_ticks, wf_metric, ho_metric,
                  fv->wf_to_held_out_gap, bal_buf);
     } else if (TrainingSink_IsCancelled(cancel)) {
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d CANCELLED mid-validation", horizon_ticks);
     } else {
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                  "h=%d FAILED: held-out did not complete",
                  horizon_ticks);
     }
@@ -1396,7 +1495,7 @@ inline void TrainingWorkers_PoolJob(void* ctx, int h) {
     TrainingHorizonJob* job = ((TrainingHorizonJob**)ctx)[h];
     if (!job) return;
     if (TrainingSink_IsCancelled(job->sink.cancel)) {
-        TrainingSink_Status(job->sink.status, job->sink.status_cap,
+        TrainingSink_Status(job->sink.status,
                             "h=%d not started: the run was cancelled", job->req.horizon_ticks);
         return;
     }
@@ -1406,11 +1505,13 @@ inline void TrainingWorkers_PoolJob(void* ctx, int h) {
 // A run that stops before it starts: say why, and publish the run's completion.
 __attribute__((format(printf, 2, 3)))  // -Werror=format sees every call (cmake/FormatGuard.cmake)
 inline void TrainingWorkers_Refuse(const TrainingRunSink& sink, const char* fmt, ...) {
-    if (sink.status && sink.status_cap) {
+    if (sink.status) {
+        char text[sizeof(sink.status->text)];
         va_list ap;
         va_start(ap, fmt);
-        vsnprintf(sink.status, sink.status_cap, fmt, ap);
+        vsnprintf(text, sizeof(text), fmt, ap);
         va_end(ap);
+        TrainingStatusLine_Set(sink.status, text);
     }
     TrainingSink_FinishRun(sink);
 }
@@ -1426,7 +1527,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         const TrainingHorizonDisplay& hd = sink.horizon[h];
         TrainingSink_Set(hd.complete, 0);
         TrainingSink_Set(hd.progress, 0);
-        if (hd.status && hd.status_cap) hd.status[0] = '\0';
+        TrainingStatusLine_Set(hd.status, "");
     }
     TrainingSink_Set(sink.total, 0);
     if (!out) {
@@ -1541,14 +1642,14 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         for (int h = 0; h < horizon_count; ++h) {
             if (TrainingSink_IsCancelled(sink.cancel)) {
                 for (int r = h; r < horizon_count; ++r)
-                    TrainingSink_Status(sink.horizon[r].status, sink.horizon[r].status_cap,
+                    TrainingSink_Status(sink.horizon[r].status,
                                         "h=%d not started: the run was cancelled", req.horizon_ticks[r]);
                 break;
             }
             const TrainingHorizonDisplay& hd = sink.horizon[h];
             TrainingHorizonJob *job = TrainingWorkers_AllocZeroed<TrainingHorizonJob>();
             if (!job) {
-                TrainingSink_Status(hd.status, hd.status_cap,
+                TrainingSink_Status(hd.status,
                                     "h=%d FAILED: malloc job arg", req.horizon_ticks[h]);
                 TrainingSink_PublishComplete(hd.complete);
                 continue;
@@ -1567,7 +1668,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
                            (size_t)view.sample_count * sizeof(float));
             }
             if (!job->view.labels) {
-                TrainingSink_Status(hd.status, hd.status_cap,
+                TrainingSink_Status(hd.status,
                                     "h=%d FAILED: malloc labels[]", req.horizon_ticks[h]);
                 TrainingSink_PublishComplete(hd.complete);
                 free(job);
@@ -1606,7 +1707,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
                 fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
                         h, horizon_count);
                 for (int r = h; r < horizon_count; ++r)
-                    TrainingSink_Status(sink.horizon[r].status, sink.horizon[r].status_cap,
+                    TrainingSink_Status(sink.horizon[r].status,
                                         "h=%d not started: the run was cancelled", req.horizon_ticks[r]);
                 break;
             }
@@ -1625,7 +1726,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
                 view.labels = own_labels;
             }
             if (!view.labels) {
-                TrainingSink_Status(hs.status, hs.status_cap,
+                TrainingSink_Status(hs.status,
                                     "h=%d FAILED: malloc labels[]", req.horizon_ticks[h]);
                 TrainingSink_PublishComplete(hs.complete);
                 continue;
@@ -1649,7 +1750,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
         out->validated += out->outcome[h].validated;
         out->stamped   += out->outcome[h].stamped;
     }
-    TrainingSink_Status(sink.status, sink.status_cap,
+    TrainingSink_Status(sink.status,
                         "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "
                         "%d stamped. Models in %s/<class>/%s/%s*/.",
                         out->trained, horizon_count, out->validated, out->stamped,
@@ -1733,7 +1834,7 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
                                               FullValidationResults* out) {
     if (!out || !req.data) {
         if (out) memset((void *)out, 0, sizeof(*out));   // completion is published: no stale result behind it
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                             "Full validation: no dataset or result storage in the request — refused.");
         TrainingSink_Finish(sink.complete, sink.running);
         return;
@@ -1818,38 +1919,38 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
     // A one-line status summary for the panel.
     if (out->auto_stamp_attempted) {
         if (out->auto_stamp_ok) {
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Stamp written: %s", out->auto_stamp_path_written);
         } else {
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Stamp REFUSED: %s", out->auto_stamp_error);
         }
     } else if (out->ran_held_out) {
         if (!auto_stamp_enabled) {
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
         } else if (req.model_path[0] == '\0') {
             // v5.9.4a / v5.10.0E — the model path as it was AT CLICK TIME (the panel's button needs a
             // non-empty path, so this is a headless caller's empty request).
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Held-out OK; auto-stamp skipped — model_path was empty in the request "
                                 "(set Model Path BEFORE clicking Run Full Validation)");
         } else if (out->auto_stamp_path[0] == '\0') {
             // Truly unexpected — the request's path was non-empty but the copy didn't populate.
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Held-out OK; auto-stamp skipped — model_path='%.*s' "
                                 "non-empty but auto_stamp_path empty "
                                 "(internal copy failure; report bug)",
                                 (int)strnlen(req.model_path, sizeof(req.model_path)), req.model_path);
         } else {
-            TrainingSink_Status(sink.status, sink.status_cap,
+            TrainingSink_Status(sink.status,
                                 "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
                                 "did not fire stamp_write (auto_stamp_path='%s'; check "
                                 "ran_held_out flag + path validity)",
                                 out->auto_stamp_path);
         }
     } else {
-        TrainingSink_Status(sink.status, sink.status_cap,
+        TrainingSink_Status(sink.status,
                             "Held-out did not complete (cancel or shape error?)");
     }
     // F6 — the result is complete: publish it LAST (release); the panel reads with acquire.
