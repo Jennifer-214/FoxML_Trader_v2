@@ -197,7 +197,7 @@ struct TrainingHorizonSink {
     TrainingStatusLine* status;          // the horizon's status line (NULL = not displayed)
     volatile int* progress;              // 0..100, written by the validation pass
     volatile int* complete;              // published (release) LAST, after every file the horizon writes
-    volatile int* cancel;                // READ — under the orchestrator, the run's cancel
+    const SuiteCancelWord* cancel;       // READ — under the orchestrator, the run's cancel
 };
 //======================================================================
 // [END_CODE]
@@ -252,7 +252,7 @@ struct TrainingHorizonDisplay {
 //======================================================================
 struct TrainingRunSink {
     TrainingStatusLine* status;          // the run's status line
-    volatile int*       cancel;          // READ — the operator's cancel
+    const SuiteCancelWord* cancel;       // READ — the operator's cancel
     volatile int*       total;           // N
     volatile int*       current;         // the horizon in progress (ticks)
     volatile int*       done;            // horizons finished
@@ -553,7 +553,7 @@ struct TrainingFvRequest {
 struct TrainingFvSink {
     TrainingStatusLine* status;
     volatile int* progress;              // 0..100, written by the validation pass
-    volatile int* cancel;                // READ
+    const SuiteCancelWord* cancel;       // READ
     volatile int* complete;              // published (release) LAST — the panel shows the result once it reads 1 (acquire)
     volatile int* running;               // cleared (release) LAST
 };
@@ -608,7 +608,7 @@ inline void TrainingSink_FinishRun(const TrainingRunSink& sink) {
 inline int TrainingSink_Load(const volatile int* flag) {
     return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
 }
-inline TrainingHorizonSink TrainingSink_ForHorizon(const TrainingHorizonDisplay& d, volatile int* cancel) {
+inline TrainingHorizonSink TrainingSink_ForHorizon(const TrainingHorizonDisplay& d, const SuiteCancelWord* cancel) {
     TrainingHorizonSink s{};
     s.status     = d.status;
     s.progress   = d.progress;
@@ -940,11 +940,11 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     const tt::XGBHyperparams& snap_hp                = req.hp;
     BacktestResults*          results                = view;
     BacktestRunConfig*        local_run_cfg          = run_cfg;
-    // Backtest_RunFullValidation writes progress and reads cancel through non-null pointers.
+    // Backtest_RunFullValidation writes progress through a non-null pointer; a NULL cancel word reads as never
+    // cancelled (SuiteCancel_Requested), so it needs no stand-in.
     volatile int  progress_unwired = 0;
-    volatile int  cancel_never     = 0;
     volatile int* progress = sink.progress ? sink.progress : &progress_unwired;
-    volatile int* cancel   = sink.cancel   ? sink.cancel   : &cancel_never;
+    const SuiteCancelWord* cancel = sink.cancel;
     // TECH_DEBT-302c — tag this thread's [WF marker] crash-bisection lines with its horizon, in BOTH
     // dispatch modes (only the parallel worker used to set it, so serial markers were untagged — F9).
     const int prev_marker = g_wf_marker_horizon;
@@ -1870,11 +1870,11 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
         return;
     }
     const BacktestResults* data = req.data;
-    // Backtest_RunFullValidation writes progress and reads cancel through non-null pointers.
+    // Backtest_RunFullValidation writes progress through a non-null pointer; a NULL cancel word reads as never
+    // cancelled (SuiteCancel_Requested), so it needs no stand-in.
     volatile int  progress_unwired = 0;
-    volatile int  cancel_never     = 0;
     volatile int* progress = sink.progress ? sink.progress : &progress_unwired;
-    volatile int* cancel   = sink.cancel   ? sink.cancel   : &cancel_never;
+    const SuiteCancelWord* cancel = sink.cancel;
 
     // Build held-out split and unlock immediately. The friction-grade lock
     // exists to make held-out access a deliberate operator action; the

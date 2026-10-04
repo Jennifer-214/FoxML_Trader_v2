@@ -1064,7 +1064,7 @@ namespace tt {
 static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
                                                      const BacktestRunConfig *run_cfg,
                                                      volatile int *progress_pct,
-                                                     volatile int *cancel_flag,
+                                                     const SuiteCancelWord *cancel_flag,
                                                      CandleAccumulator *candle_acc,
                                                      TUISnapshot *out_snapshot);
 }
@@ -1807,7 +1807,7 @@ static inline BacktestRunStatus Backtest_Run(uint64_t lease,
                                              BacktestResults *results,
                                              const BacktestRunConfig *run_cfg,
                                              volatile int *progress_pct,
-                                             volatile int *cancel_flag,
+                                             const SuiteCancelWord *cancel_flag,
                                              CandleAccumulator *candle_acc,
                                              TUISnapshot *out_snapshot = NULL) {
     if (!SuiteLease_HeldBy(lease)) {
@@ -2034,7 +2034,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int horizon_ticks,           // TECH_DEBT-301b — REQUIRED, never defaulted: the purge gap is a
                                  // function of the horizon, and a silent 0 would purge only the
                                  // feature-lookback half while reading as fully purged.
-    volatile int *cancel_flag,
+    const SuiteCancelWord *cancel_flag,
     const tt::XGBHyperparams *hp_override = nullptr);
 
 //======================================================================
@@ -2154,7 +2154,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
-                                            volatile int *cancel_flag,
+                                            const SuiteCancelWord *cancel_flag,
                                             int label_type,
                                             const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr,
                                             const tt::XGBHyperparams *hp_override = nullptr);
@@ -2185,7 +2185,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 int n_splits, int horizon,
                                                 int buffer, int min_train,
                                                 volatile int *progress,
-                                                volatile int *cancel,
+                                                const SuiteCancelWord *cancel,
                                                 int label_type,
                                                 float gap_threshold,
                                                 // E.1.3 CS-273 — the run's clock (μs since the
@@ -2805,7 +2805,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
-                                            volatile int *cancel_flag,
+                                            const SuiteCancelWord *cancel_flag,
                                             int label_type,
                                             const ControllerConfig<BACKTEST_FP> *cfg_override,
                                             const tt::XGBHyperparams *hp_override) {
@@ -3628,7 +3628,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     const HeldOutSplit *split,
     int label_type,
     int horizon_ticks,           // TECH_DEBT-301b — drives the purge gap; see the band computation below
-    volatile int *cancel_flag,
+    const SuiteCancelWord *cancel_flag,
     const tt::XGBHyperparams *hp_override) {
     HeldOutTrainEvalResult r = {};
 
@@ -4152,7 +4152,7 @@ static inline void Backtest_RunSweep(uint64_t lease,
                                       const OptimizerRange *ranges, int num_params,
                                       int metric_idx,
                                       volatile int *current_run, volatile int *total_runs,
-                                      volatile int *cancel_flag) {
+                                      const SuiteCancelWord *cancel_flag) {
     // MP-6 (D-503) — the sweep runs every cell through Backtest_Run on the caller's lease; refuse here, before the
     // caller's results are touched, rather than once per cell
     if (!SuiteLease_HeldBy(lease)) {
@@ -4317,7 +4317,7 @@ static inline void Backtest_RunHyperparamTrainSweep(
     int label_type,
     int wf_n_splits, int wf_horizon, int wf_buffer, int wf_min_train,
     volatile int *current_run, volatile int *total_runs,
-    volatile int *cancel_flag) {
+    const SuiteCancelWord *cancel_flag) {
 
     if (!OptimizerGrid_Fits(ranges, num_params)) {   // before the results are touched (D-507 review F2)
         fprintf(stderr, "[hpsweep] REFUSED: the grid does not fit the results (each axis 1..%d steps, at most %d "
@@ -4434,7 +4434,7 @@ static inline void Backtest_RunHyperparamTrainSweep(
             int worker_id;
             int n_workers;
             int total_runs;
-            volatile int *cancel_flag;
+            const SuiteCancelWord *cancel_flag;
             volatile int *current_run;
             std::function<void(int)> *run_cell_fn;
         };

@@ -57,6 +57,7 @@
 #include <cstring>
 #include <pthread.h>
 #include <time.h>
+#include <type_traits>
 
 //======================================================================
 // [STRUCT]_[SuiteLeaseState]
@@ -315,9 +316,20 @@ inline void SuiteGate_NeedLease(SuiteGate* g) {
 //======================================================================
 // [CODE]
 //======================================================================
+// A run's CANCEL WORD — the panel's Cancel stores it, the worker (or a core it hands the word to) polls it. A TYPE, not
+// an int: a plain or volatile read of a word another thread stores atomically is a data race under the C++ model (the
+// 2026-10-03 run review, L2), and a struct has no `*p` / `if (*p)` reading — SuiteCancel_Requested is the one reader,
+// SuiteJob_Cancel / SuiteJob_Begin the only writers (fold NF-6's compile-time close, homed at MP-6 commit (3)).
+// Zero-initialised = not cancelled, so calloc / memset / `{}` all make a fresh word.
+struct SuiteCancelWord { int cancel_raw; };
+static_assert(std::is_trivially_copyable<SuiteCancelWord>::value && sizeof(SuiteCancelWord) == sizeof(int),
+              "a cancel word stays one int, zero-fillable");
+static_assert(!std::is_convertible<SuiteCancelWord, bool>::value && !std::is_convertible<SuiteCancelWord, int>::value,
+              "no conversion may make a plain read of the cancel word compile — read it with SuiteCancel_Requested");
+
 struct alignas(64) SuiteJob {
     volatile uint64_t running;    // the lease token of the run it shows, 0 = none — written ONLY by SuiteJob_Begin / _End
-    volatile int      cancel;     // set by the panel's Cancel, polled by the worker
+    SuiteCancelWord   cancel;     // set by the panel's Cancel (SuiteJob_Cancel), polled through SuiteCancel_Requested
     volatile int      progress;   // the worker's — a percent when total == 0, else a count out of total
     volatile int      total;
     volatile int      complete;   // the worker publishes "this run's result is readable" LAST (release); read with acquire
@@ -354,13 +366,15 @@ inline void SuiteJob_Publish(SuiteJob* j) { __atomic_store_n(&j->complete, 1, __
 // The panel, when the data a finished result describes is gone (a new collect) — the job is not running then.
 inline void SuiteJob_Forget(SuiteJob* j) { __atomic_store_n(&j->complete, 0, __ATOMIC_RELAXED); }
 
-inline void SuiteJob_Cancel(SuiteJob* j) { __atomic_store_n(&j->cancel, 1, __ATOMIC_RELAXED); }
+inline void SuiteJob_Cancel(SuiteJob* j) { __atomic_store_n(&j->cancel.cancel_raw, 1, __ATOMIC_RELAXED); }
 
 // The ONE reader of a cancel word — SuiteJob_Cancel's twin, for every worker's poll, whether it holds the SuiteJob or
 // only the word a core was handed (NULL = never cancelled). A plain or volatile read of a word another thread stores
 // atomically is a data race under the C++ model — benign on x86, undefined all the same (the 2026-10-03 run review,
 // L2: the collect worker, the sharded driver and the sweeps each read it plainly).
-inline bool SuiteCancel_Requested(const volatile int* word) { return word && __atomic_load_n(word, __ATOMIC_RELAXED) != 0; }
+inline bool SuiteCancel_Requested(const SuiteCancelWord* word) {
+    return word && __atomic_load_n(&word->cancel_raw, __ATOMIC_RELAXED) != 0;
+}
 
 //======================================================================
 // [FUNCTION]_[SuiteJob_Begin]
@@ -372,7 +386,7 @@ inline bool SuiteCancel_Requested(const volatile int* word) { return word && __a
 // [CODE]
 //======================================================================
 inline void SuiteJob_Begin(SuiteJob* j, uint64_t lease) {
-    __atomic_store_n(&j->cancel, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&j->cancel.cancel_raw, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&j->progress, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&j->total, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&j->complete, 0, __ATOMIC_RELAXED);

@@ -119,7 +119,7 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
 static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
                                                      const BacktestRunConfig *run_cfg,
                                                      volatile int *progress_pct,
-                                                     volatile int *cancel_flag,
+                                                     const SuiteCancelWord *cancel_flag,
                                                      CandleAccumulator *candle_acc,
                                                      TUISnapshot *out_snapshot = NULL) {
     // Reset results — preserve dynamic allocations like the legacy path does
