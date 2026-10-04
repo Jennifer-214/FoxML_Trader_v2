@@ -1271,8 +1271,9 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
         // is a legal Shape-B single-zoo load that silently skips the
         // ensemble, the bandits, and (on the picker path) HMAC verify. The
         // operator almost always meant the family BASE path. WARN-only:
-        // a family name legitimately containing `_horizon_<digits>` is
-        // pathological but possible, so this never refuses.
+        // a family named in either horizon grammar is refused at training
+        // since MP-6 (3c-1b) (ModelPath_FamilyNameValid), but an older one
+        // on disk is possible, so this never refuses.
         if (cfg.node_model_dir[c][0]) {
             const char* bn = strrchr(cfg.node_model_dir[c], '/');
             bn = bn ? bn + 1 : cfg.node_model_dir[c];
@@ -1280,17 +1281,8 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
             // basename `horizon_<digits>`. The retired flat grammar
             // (`<fam>_horizon_<digits>`) warns identically — either way the
             // operator pointed BELOW/BESIDE the family node.
-            int looks_like_horizon = (ModelPath_ParseHorizonChild(bn) > 0);
-            if (!looks_like_horizon) {
-                const char* hz = strstr(bn, "_horizon_");
-                while (hz) {  // LAST occurrence (mirrors the old split rule)
-                    const char* nx = strstr(hz + 1, "_horizon_");
-                    if (!nx) break;
-                    hz = nx;
-                }
-                looks_like_horizon = (hz && Model_ParseHorizonSibling(bn, bn,
-                              (int)(hz - bn) + 9 /* strlen("_horizon_") */) > 0);
-            }
+            const int looks_like_horizon = ModelPath_ParseHorizonChild(bn) > 0 ||
+                                           ModelPath_RetiredFlatHorizon(bn) > 0;   // the schema's ONE rules
             if (looks_like_horizon) {
                 fprintf(stderr, "[boot] WARN: node %d node_model_dir '%s' looks "
                         "like a HORIZON dir — this loads a single-zoo WITHOUT "

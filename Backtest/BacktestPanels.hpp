@@ -3771,6 +3771,10 @@ struct TrainingPanelState {
 // Over-aligned through its alignas(64) members: it lives in foxml_suite.cpp's static storage, never malloc / calloc
 // (Check K — an over-aligned type from bare malloc is misaligned, UB).
 static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment changed: re-check how it is allocated");
+// The gate judges this field; the core judges the request's copy of it — ONE size, or the two would judge different names
+// (MP-6 (3c-1b)'s review, F9).
+static_assert(sizeof(TrainingPanelState::run_name) == TRAINING_RUN_NAME_CAP,
+              "the panel's Run Name and the request's run_name must hold the same bytes");
 //======================================================================
 // [END_CODE]
 //======================================================================
@@ -5891,7 +5895,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Re-running with the same prefix overwrites previous results — pick\n"
         "a unique name per experiment (e.g. btc_5min_v1, btc_5min_v2, ...).");
     // Live preview of what dirs will be created
-    if (state->run_name[0] != '\0' && state->ui_horizon_count > 0) {
+    // a path is advertised only for a name that can name a family — the gate below says why one cannot (MP-6 (3c-1b))
+    if (ModelPath_FamilyNameValid(state->run_name, sizeof(state->run_name)) && state->ui_horizon_count > 0) {
         // E.1.2.C — this was the FOURTH and last hand-copy of the label->role rule,
         // and the only operator-FACING one, so it was the one that lied to a human.
         // It ignored ui_training_side, so with Training Side = Exit it advertised
@@ -5935,11 +5940,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (D-507) — which also keeps a collect from reallocating the results a
     // trainer reads (E.1.2.D NEW-5) without a term of its own. The gate's
     // terms (Backtest/SuiteStartGates.hpp): a build that trains, the side's
-    // verdict, the CSV fields applied as typed, a horizon, the suite free,
-    // the samples.
+    // verdict, the CSV fields applied as typed, a Run Name that names a model
+    // family, a horizon, the suite free, the samples.
     const SuiteGate train_gate =
         StartGate_TrainModel(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count,
-                             RunControl_DatasetSamples(run_control), csv_bad);
+                             RunControl_DatasetSamples(run_control), csv_bad,
+                             ModelPath_FamilyNameValid(state->run_name, sizeof(state->run_name)));
     const bool can_train = SuiteGate_Open(&train_gate);
 
     // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
@@ -5997,7 +6003,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     int train_lk_n = state->ui_label_kind_per_horizon_count;
     const SuiteGate mh_train_gate =
         StartGate_TrainMultiHorizon(START_GATE_BUILD_TRAINS, side_gate, state->ui_horizon_count, train_tp_n, train_sl_n,
-                                    train_lk_n, RunControl_DatasetSamples(run_control), csv_bad);
+                                    train_lk_n, RunControl_DatasetSamples(run_control), csv_bad,
+                                    ModelPath_FamilyNameValid(state->run_name, sizeof(state->run_name)));
     const bool mh_can_train = SuiteGate_Open(&mh_train_gate);
     if (!single_horizon_mode) {
     if (!mh_can_train) ImGui::BeginDisabled();

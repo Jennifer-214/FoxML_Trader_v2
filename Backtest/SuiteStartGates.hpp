@@ -520,6 +520,12 @@ inline void StartGate_NeedHorizons(SuiteGate* g, int horizons) {
 inline void StartGate_NeedCsvs(SuiteGate* g, const char* bad_csv) {
     SuiteGate_NeedFix(g, bad_csv == nullptr, "(%s: fix the value in red)", bad_csv ? bad_csv : "");
 }
+// E.1.3 MP-6 (3c-1b) — the run name must NAME a model family (ModelPath_FamilyNameValid: letters, digits, '_' first, then
+// '.' and '-' too, at most 31, not a horizon word); the core refuses one that cannot, and the gate asks first. A FIX: an
+// input to correct. `family_name_ok` is the panel's verdict over its field, so the gate stays pure.
+inline void StartGate_NeedFamilyName(SuiteGate* g, bool family_name_ok) {
+    SuiteGate_NeedFix(g, family_name_ok, "(Run Name: letters, digits, _ . - only; max 31)");   // fits SuiteGate::why
+}
 // side_gate is Training_SideLabelGate's verdict over the label set (0 refuse, 1 warn, 2 ok); the panel says why above.
 // Anything but a warn or an ok refuses.
 inline void StartGate_NeedSideAccepts(SuiteGate* g, int side_gate) {
@@ -693,7 +699,7 @@ inline SuiteGate StartGate_CollectMultiHorizon(int selected_files, int horizons,
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [GUI] [ML]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Train Model's gate — a build that trains, the training side's verdict on the label, its CSV fields parsed whole, a horizon typed (the one it trains), the suite free, then the samples a collect must produce]
+// [OVERVIEW]_[Train Model's gate — a build that trains, the training side's verdict on the label, its CSV fields parsed whole, a Run Name that names a model family, a horizon typed (the one it trains), the suite free, then the samples a collect must produce]
 //======================================================================
 // E.1.2.C — the side term is the half F3 was missing: the verdict used to reach only the two COLLECT gates, so a
 // REFUSE-tier label could still be TRAINED from samples an earlier collect had left behind (collect at side=Buy, flip
@@ -701,11 +707,13 @@ inline SuiteGate StartGate_CollectMultiHorizon(int selected_files, int horizons,
 //======================================================================
 // [CODE]
 //======================================================================
-inline SuiteGate StartGate_TrainModel(bool build_trains, int side_gate, int horizons, int samples, const char* bad_csv) {
+inline SuiteGate StartGate_TrainModel(bool build_trains, int side_gate, int horizons, int samples, const char* bad_csv,
+                                      bool family_name_ok) {
     SuiteGate g;
     StartGate_NeedBuildTrains(&g, build_trains);
     StartGate_NeedSideAccepts(&g, side_gate);
     StartGate_NeedCsvs(&g, bad_csv);
+    StartGate_NeedFamilyName(&g, family_name_ok);
     StartGate_NeedHorizons(&g, horizons);
     SuiteGate_NeedLease(&g);
     StartGate_NeedTrainSamples(&g, samples);
@@ -730,11 +738,12 @@ inline SuiteGate StartGate_TrainModel(bool build_trains, int side_gate, int hori
 // [CODE]
 //======================================================================
 inline SuiteGate StartGate_TrainMultiHorizon(bool build_trains, int side_gate, int horizons, int tp_n, int sl_n,
-                                             int lk_n, int samples, const char* bad_csv) {
+                                             int lk_n, int samples, const char* bad_csv, bool family_name_ok) {
     SuiteGate g;
     StartGate_NeedBuildTrains(&g, build_trains);
     StartGate_NeedSideAccepts(&g, side_gate);
     StartGate_NeedCsvs(&g, bad_csv);
+    StartGate_NeedFamilyName(&g, family_name_ok);
     StartGate_NeedHorizons(&g, horizons);
     StartGate_NeedAlignedTpSl(&g, horizons, tp_n, sl_n);
     StartGate_NeedAlignedKinds(&g, horizons, lk_n);

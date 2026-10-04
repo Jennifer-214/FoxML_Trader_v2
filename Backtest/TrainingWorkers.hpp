@@ -964,8 +964,25 @@ inline void TrainingWorkers_RunSaw(const char* where, TrainingCoreStatus st, uin
 //======================================================================
 // [CODE]
 //======================================================================
+// The request's path fields are fixed arrays a headless caller may leave unterminated: one bound for both requests.
+inline constexpr size_t TRAINING_MODELS_ROOT_CAP = sizeof(TrainingRunRequest::models_root);
+inline constexpr size_t TRAINING_RUN_NAME_CAP    = sizeof(TrainingRunRequest::run_name);
+// A family's path always fits: the root, the longest class tree ("classification" — Training_ResolveClassTree's words),
+// a family name, the separators and the terminator. A path too long is never refused in the NAME's words.
+inline constexpr size_t TRAINING_FAMILY_DIR_CAP  = 340;
+static_assert(TRAINING_FAMILY_DIR_CAP >= TRAINING_MODELS_ROOT_CAP + sizeof("/classification/") + MODEL_FAMILY_NAME_MAX,
+              "a family's path must always fit its buffer");
+static_assert(sizeof(TrainingHorizonRequest::models_root) == TRAINING_MODELS_ROOT_CAP &&
+              sizeof(TrainingHorizonRequest::run_name) == TRAINING_RUN_NAME_CAP,
+              "one bound for both requests' path fields");
+// False when the request cannot NAME a family (MP-6 (3c-1b)): no root, a root with no end within its array, or a run name
+// that is not one path component the scanners see (ModelPath_FamilyNameValid) — read before anything composes a path,
+// so a field with no terminator is never read past its array.
 inline bool TrainingWorkers_FamilyDir(char* out, size_t cap, const char* models_root, int primary_label_type,
                                       const char* run_name) {
+    if (!models_root || !models_root[0] || strnlen(models_root, TRAINING_MODELS_ROOT_CAP) == TRAINING_MODELS_ROOT_CAP ||
+        !ModelPath_FamilyNameValid(run_name, TRAINING_RUN_NAME_CAP))
+        return false;
     return ModelPath_FamilyDir(out, cap, models_root, Training_ResolveClassTree(primary_label_type), run_name);
 }
 // Does descriptor `fd` hold `family`'s publish lock? A public entry VERIFIES its caller's proof — never assumes it, and
@@ -1004,7 +1021,7 @@ inline bool TrainingWorkers_HoldsFamilyLock(int fd, const char* family) {
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; then the caller's proof of its model family's publish lock (D-483 — a descriptor on <family>/.foxml_state.lock holding its flock), verified SECOND: without it REFUSED_PUBLISH_LOCK, nothing written; otherwise RAN, the outcome in the caller's slot]
+// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; then a request that can NAME its family (MP-6 (3c-1b) — else an input refusal: RAN, the row says why); then the caller's proof of the family's publish lock (D-483 — a descriptor on <family>/.foxml_state.lock holding its flock), before anything is written: without it REFUSED_PUBLISH_LOCK; otherwise RAN, the outcome in the caller's slot]
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // v5.11.41 — the per-horizon FV helper, moved here by MP-1 (it was mh_run_one_horizon_fv in the
@@ -1030,9 +1047,20 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
                         "nothing written\n", req.horizon_ticks, (unsigned long long)lease);
         return TRAINING_CORE_REFUSED_NO_LEASE;
     }
-    char family_dir[340];
-    if (!TrainingWorkers_FamilyDir(family_dir, sizeof(family_dir), req.models_root, req.primary_label_type, req.run_name) ||
-        !TrainingWorkers_HoldsFamilyLock(family_lock_fd, family_dir)) {   // SECOND: its files sit behind the family lock
+    char family_dir[TRAINING_FAMILY_DIR_CAP];
+    if (!TrainingWorkers_FamilyDir(family_dir, sizeof(family_dir), req.models_root, req.primary_label_type, req.run_name)) {
+        // the request cannot NAME a family (MP-6 (3c-1b)) — an input refusal, before the proof (the proof needs a family)
+        // and before anything is written; the run refuses it first, so only a direct caller lands here
+        fprintf(stderr, "[mh-train] horizon %d: the run name or models root cannot name a model family — refused\n",
+                req.horizon_ticks);
+        TrainingSink_Status(sink.status, "h=%d FAILED: the run name or models root cannot name a model family",
+                            req.horizon_ticks);
+        if (result) memset((void *)result, 0, sizeof(*result));   // the slot is written on every path
+        TrainingSink_PublishComplete(sink.complete);
+        if (outcome_out) *outcome_out = TrainingHorizonOutcome{};
+        return TRAINING_CORE_RAN;
+    }
+    if (!TrainingWorkers_HoldsFamilyLock(family_lock_fd, family_dir)) {   // then its files sit behind the family lock
         fprintf(stderr, "[mh-train] horizon %d REFUSED: the caller's descriptor %d does not hold the publish lock of "
                         "'%s' — nothing written\n", req.horizon_ticks, family_lock_fd, family_dir);
         return TRAINING_CORE_REFUSED_PUBLISH_LOCK;
@@ -1043,6 +1071,7 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
                 req.horizon_ticks);
         TrainingSink_Status(sink.status,
                             "h=%d FAILED: missing dataset view, run config or result slot", req.horizon_ticks);
+        if (result) memset((void *)result, 0, sizeof(*result));   // the slot is written on every path
         TrainingSink_PublishComplete(sink.complete);
         if (outcome_out) *outcome_out = outcome;
         return TRAINING_CORE_RAN;
@@ -1701,9 +1730,22 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
             return TRAINING_CORE_RAN;
         }
     }
-    // An empty root would put the model tree at the filesystem root ("/<class>/...").
-    if (!req.models_root[0] || !req.run_cfg) {
-        TrainingWorkers_Refuse(sink, "Multi-horizon: no models root or run config in the request — refused.");
+    // An empty root would put the model tree at the filesystem root ("/<class>/..."); a root with no end within its array
+    // would be read past it.
+    if (!req.models_root[0] || strnlen(req.models_root, TRAINING_MODELS_ROOT_CAP) == TRAINING_MODELS_ROOT_CAP ||
+        !req.run_cfg) {
+        TrainingWorkers_Refuse(sink, "Multi-horizon: no models root (or one with no end within its %zu bytes) or run config "
+                                     "in the request — refused.", TRAINING_MODELS_ROOT_CAP);
+        return TRAINING_CORE_RAN;
+    }
+    // The FAMILY this run writes (D-431), named ONCE, here — by the one rule its lock, its horizons' proofs and their
+    // writes read (TrainingWorkers_FamilyDir). A run name that cannot name one is refused before anything runs (MP-6
+    // (3c-1b), her CC-09 call) — never echoed: it may hold a control character, or no end.
+    char family[TRAINING_FAMILY_DIR_CAP];
+    if (!TrainingWorkers_FamilyDir(family, sizeof(family), req.models_root, req.primary_label_type, run_name)) {
+        TrainingWorkers_Refuse(sink, "Multi-horizon: the run name cannot name a model family — letters, digits, '_', "
+                                     "'.', '-' (not first), at most %d, not a horizon_<N> word — refused.",
+                               MODEL_FAMILY_NAME_MAX);
         return TRAINING_CORE_RAN;
     }
     if (!req.data || req.data->sample_count <= 0) {
@@ -1792,12 +1834,10 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
     // file description: a second open in this process would be refused by this one. Held elsewhere — an engine's ML node
     // bound to the family, another training run, or a Past Runs delete in progress: two writers, so no horizon starts.
     const bool cancelled = !mh_labels_aborted && SuiteCancel_Requested(sink.cancel);
-    char family[340] = "";
     int  family_fd   = -1;
     int  family_lock = -2;   // -2 not taken (nothing will be written) · 1 held · 0 held elsewhere · -1 cannot be locked
     if (!mh_labels_aborted && !cancelled)
-        family_lock = TrainingWorkers_FamilyDir(family, sizeof(family), req.models_root, req.primary_label_type, run_name)
-                          ? FoxDir_LockExclusive(family, MODEL_STATE_LOCK_FILE, &family_fd) : -1;
+        family_lock = FoxDir_LockExclusive(family, MODEL_STATE_LOCK_FILE, &family_fd);   // `family`: named at the inputs
 
     if (mh_labels_aborted) {
         for (int h = 0; h < horizon_count; ++h)   // the cancel path's shape: each row says why it never ran
@@ -1953,8 +1993,8 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
                             family, MODEL_STATE_LOCK_FILE);
     else if (family_lock != 1)
         TrainingSink_Status(sink.status, "Multi-horizon: the model family %s cannot be locked (an unwritable or missing "
-                                         "models root, or a path that cannot be named) — refused, nothing trained.",
-                            family);
+                                         "models root — the log's [mkdir] / [dirlock] line says why) — refused, nothing "
+                                         "trained.", family);
     else
         TrainingSink_Status(sink.status,
                             "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "

@@ -165,6 +165,67 @@ static inline bool ModelPath_FamilyOfHorizonDir(const char* horizon_dir, char* b
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[ModelPath_RetiredFlatHorizon]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the horizon a name carries in the RETIRED flat form "<family>_horizon_<N>" (the LAST "_horizon_", a non-empty family before it, a canonical N) — >0 when it does, -1 otherwise; the ONE spelling of the rule the picker, the boot WARN and the family-name rule read]
+//======================================================================
+// Hand-copied twice until MP-6 (3c-1b)'s review (F2 — GUI/ModelBundleScan.hpp and CoreFrameworks/EngineCommon.hpp, the
+// copies disagreeing on a name that BEGINS with "_horizon_"): a Class 59-A duplicate on the schema's own surface.
+//======================================================================
+// [CODE]
+//======================================================================
+static inline long ModelPath_RetiredFlatHorizon(const char* name) {
+    if (!name) return -1;
+    const char* last = nullptr;
+    for (const char* p = name; (p = strstr(p, "_horizon_")) != nullptr; ++p) last = p;
+    if (!last || last == name) return -1;   // no family before it
+    return Model_ParseHorizonSibling(name, name, (int)(last - name) + 9 /* strlen("_horizon_") */);
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelPath_RetiredFlatHorizon]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ModelPath_FamilyNameValid]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[can `name` name a model FAMILY (D-431's bundle node)? An ALLOW-list — [A-Za-z0-9_] first, then [A-Za-z0-9_.-], at most MODEL_FAMILY_NAME_MAX bytes, its end within `cap` — and not a schema word (a horizon child "horizon_<N>", a retired flat "<x>_horizon_<N>")]
+//======================================================================
+// Her call (CC-09, the 2026-09-30 gate): the core validates the run name — one path component, bounded, no control
+// characters. Kept as an ALLOW-list (MP-6 (3c-1b)'s review, F1 / F2 / F4 / F6 — hers to veto) because a deny-list leaked
+// to every consumer the name meets: the engine's cfg loader (a '#' starts a comment and edge whitespace is stripped —
+// "btc #2" would BIND "btc", serving the other family's models), the shells and tools (no spaces), the scanners (no
+// leading '.'; no schema word — a family named horizon_100 makes its class tree read as ONE family in the picker, one
+// named x_horizon_5 reads as a retired flat arm the migration tool would move), and the served-family name (D-485's
+// ensemble_name[32] — the tightest bound). MP-7c will record the name in the stamp and re-apply this rule where it reads it.
+//======================================================================
+// [CODE]
+//======================================================================
+static const int MODEL_FAMILY_NAME_MAX = 31;   // D-485's ensemble_name[32]: the tightest consumer of a family's name
+static inline bool ModelPath_FamilyNameChar(unsigned char c, bool first) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+           (!first && (c == '.' || c == '-'));
+}
+static inline bool ModelPath_FamilyNameValid(const char* name, size_t cap) {
+    if (!name || cap == 0) return false;
+    const size_t n = strnlen(name, cap);
+    if (n == 0 || n == cap || n > (size_t)MODEL_FAMILY_NAME_MAX) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (!ModelPath_FamilyNameChar((unsigned char)name[i], i == 0)) return false;
+    return ModelPath_ParseHorizonChild(name) < 0 && ModelPath_RetiredFlatHorizon(name) < 0;   // not a schema word
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelPath_FamilyNameValid]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[ModelPath_HorizonOfModelFile]
 //----------------------------------------------------------------------
 // [TAG]_[[ML_INFERENCE] [GUI] [BACKTEST]]

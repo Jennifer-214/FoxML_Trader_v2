@@ -212,17 +212,7 @@ static inline void ModelBundle_ScanParent(ModelBundleScanState* st,
         uint8_t roles = ModelBundle_ScanRoles(dir_path);
         if (roles) {
             if (st->count >= ModelBundleScanState::MAX_ENTRIES) { st->truncated = 1; continue; }
-            int old_flat = 0;
-            {
-                const char* last = nullptr;
-                for (const char* p = de->d_name; (p = strstr(p, "_horizon_")) != nullptr; ++p)
-                    last = p;
-                if (last && last != de->d_name) {
-                    const int prefix_len = (int)(last - de->d_name) + 9;
-                    old_flat = (Model_ParseHorizonSibling(de->d_name, de->d_name,
-                                                          prefix_len) > 0) ? 1 : 0;
-                }
-            }
+            const int old_flat = ModelPath_RetiredFlatHorizon(de->d_name) > 0 ? 1 : 0;   // the schema's ONE rule
             ModelBundleEntry* e = &st->entries[st->count++];
             memset(e, 0, sizeof(*e));
             e->is_family = 0;
