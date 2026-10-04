@@ -1712,27 +1712,39 @@ static inline int past_runs_unlink_cb(const char *fpath, const struct stat *sb,
 // [CODE]
 //======================================================================
 static inline int PastRuns_DeleteDir(const char *path) {
-    // D-483 C (2026-09-04) — a run dir IS a family dir (D-431: `models/<class>/<run>/horizon_<N>/`),
-    // so a running engine or backtest may have it BOUND: its `.foxml_state.lock` is held. Deleting
-    // it would orphan the lock (a fresh open() then acquires on a NEW inode) and the bound ezoo's
-    // next save would recreate the dir UNLOCKED — two writers again, one delete later. Probe with
-    // LOCK_NB: held elsewhere ⇒ REFUSE (-2). Probe only an EXISTING dir — the probe provisions its
-    // target, and a delete must never create what it is about to remove.
+    // D-483 C + D-431 — a row is a HORIZON dir (`models/<class>/<family>/horizon_<N>/` — the scan's nested rows) whose
+    // FAMILY, its parent, carries the `.foxml_state.lock` an engine's ML node bound to it, or a training run writing it,
+    // holds; a retired flat run dir is its own family. Deleting under a holder pulls files from a run mid-write or a node
+    // mid-serve — so probe the FAMILY's lock with LOCK_NB: held elsewhere ⇒ REFUSE (-2) — and HOLD the probe through the
+    // walk of a nested row: released before it, a holder taking the lock in between would have its files removed under
+    // it. (A family-level row — a retired flat run dir — is walked whole: the walk unlinks the lock file it holds, so a
+    // taker racing that walk makes a fresh one; accepted — the operator is deleting that family.) (Until MP-6 (3c-1)'s
+    // review — F1, 2026-10-04 — this probed the row's own dir: a nested family's lock was never seen, the probe made and
+    // took a fresh lock file inside the horizon.) Probe only an EXISTING dir — the probe provisions its target's lock
+    // file, so a delete never creates what it is about to remove; it may leave the lock file in a family that had none
+    // (inert — a dotfile no scanner lists).
+    char lock_dir[512];
+    if (!ModelPath_FamilyOfHorizonDir(path, lock_dir, sizeof(lock_dir)) &&   // a nested row: its family
+        snprintf(lock_dir, sizeof(lock_dir), "%s", path) >= (int)sizeof(lock_dir))   // a flat run dir: itself
+        return -1;   // a path no lock dir can be named for: not deleted
+    int probe_fd = -1;
     struct stat st;
     if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
-        int probe_fd = -1;
-        int lrc = FoxDir_LockExclusive(path, MODEL_STATE_LOCK_FILE, &probe_fd);
+        const int lrc = FoxDir_LockExclusive(lock_dir, MODEL_STATE_LOCK_FILE, &probe_fd);
         if (lrc == 0) {
-            fprintf(stderr, "[past-runs] REFUSED delete of %s: its bandit state dir is held by a "
-                            "running engine or backtest (D-483)\n", path);
+            fprintf(stderr, "[past-runs] REFUSED delete of %s: its model family's lock (%s/%s) is held — an engine's "
+                            "ML node bound to it, or a training run writing it (D-483)\n",
+                    path, lock_dir, MODEL_STATE_LOCK_FILE);
             return -2;
         }
-        FoxDir_Unlock(&probe_fd);   // we held it (1) or could not create it (-1): proceed either way
+        // 1: held until the walk is over; -1: the lock cannot be taken (an unwritable family) — proceed, as before
     }
     // FTW_DEPTH = post-order traversal so files deleted before parent dir
     // FTW_PHYS = don't follow symlinks (avoid accidentally walking into other
     //            dirs if operator has bizarre symlink configuration)
-    return nftw(path, past_runs_unlink_cb, 16, FTW_DEPTH | FTW_PHYS);
+    const int rc = nftw(path, past_runs_unlink_cb, 16, FTW_DEPTH | FTW_PHYS);
+    FoxDir_Unlock(&probe_fd);   // the walk is over (a flat row's walk removed the lock file too: its inode ends here)
+    return rc;
 }
 //======================================================================
 // [END_CODE]
@@ -2634,10 +2646,10 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     snprintf(s->status_msg, sizeof(s->status_msg),
                              "deleted: %s", dr->full_path);
                 } else if (rc == -2) {
-                    // D-483 C — a bound (lock-held) family dir is not deletable while it is in use
+                    // D-483 C — a row whose FAMILY's lock is held is not deletable while it is in use
                     snprintf(s->status_msg, sizeof(s->status_msg),
-                             "delete REFUSED: %s is in use by a running engine or backtest "
-                             "(bandit state dir lock held)", dr->full_path);
+                             "delete REFUSED: %s is in use — its model family's lock is held (an engine's ML "
+                             "node bound to it, or a training run writing it)", dr->full_path);
                 } else {
                     snprintf(s->status_msg, sizeof(s->status_msg),
                              "delete FAILED: %s (errno=%d)",
@@ -4268,9 +4280,9 @@ static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
     sink.progress   = &state->fv_job.progress;
     sink.cancel     = &state->fv_job.cancel;
     sink.complete   = &state->fv_job.complete;
-    // the funnel gave this worker the lease: a refusal would be its invariant broken — LOUD, never a line no code draws
-    if (TrainingWorkers_RunFullValidation(lease, args->req, sink, &state->fv_results) != TRAINING_CORE_RAN)
-        SuiteLease_ReportLostByHolder("Run Full Validation's worker", lease);
+    // the lease's refusal would be the funnel's invariant broken (LOUD); any other the core has already said, visibly
+    TrainingWorkers_WorkerSaw("Run Full Validation's worker",
+                              TrainingWorkers_RunFullValidation(lease, args->req, sink, &state->fv_results), lease);
     free(args);
     return NULL;
 }
@@ -4545,9 +4557,10 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
         TrainingSink_Status(sink.status, "Multi-horizon: out of memory (run result).");
         TrainingSink_FinishRun(sink);
     } else {
-        // the funnel gave this worker the lease: a refusal would be its invariant broken — LOUD (SuiteLease's own family)
-        if (TrainingWorkers_RunMultiHorizon(lease, args->req, sink, result) != TRAINING_CORE_RAN)
-            SuiteLease_ReportLostByHolder("Train Multi-Horizon's worker", lease);
+        // the lease's refusal would be the funnel's invariant broken (LOUD); a held model family the core has already
+        // said on the run line, which the panel draws once the job ends (the run sink's `complete` is NULL here)
+        TrainingWorkers_WorkerSaw("Train Multi-Horizon's worker",
+                                  TrainingWorkers_RunMultiHorizon(lease, args->req, sink, result), lease);
         free(result);
     }
     free(args);

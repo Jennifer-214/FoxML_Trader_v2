@@ -1035,7 +1035,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
                                   Money{ money_from_double_payload(node_balance) },
-                                  /*state_base_path=*/cfg.node_model_dir[i]);   // D-483 C — LIVE/paper bind learned state to the node's model dir (E.1.5 B re-homes it)
+                                  EzooLearnedState::BIND);   // D-483 C — the learned state binds where the one rule says (E.1.5 B re-homes it)
 
         // Post-helper LIVE-only wires (M5 persistence + threading observability;
         // Decision B + Decision G — STAY in caller post-helper return).

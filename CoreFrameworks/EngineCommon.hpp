@@ -256,8 +256,9 @@ inline void EngineCommon_BootGlobal(const ControllerConfig<F>& cfg,
     //    (EnsembleModelZoo_BindStateDir, the bind_state_dir post-load row): the
     //    second binder of one dir REFUSES — persistence OFF + a Health_Log line —
     //    instead of warning and then clobbering. A string compare could see two
-    //    NODES; the exclusive lock also sees a second PROCESS (a foxml_suite
-    //    backtest on the paper engine's dir — the TESTING_00 2026-09-04 case) and
+    //    NODES; the exclusive lock also sees a second PROCESS (another engine, or a
+    //    suite training run writing the family — MP-6 (3c); the TESTING_00 2026-09-04
+    //    case was a foxml_suite backtest, which binds nothing since D-483 C) and
     //    spellings a strcmp calls different ("x" vs "x/", symlinks).
 }
 //======================================================================
@@ -1220,7 +1221,7 @@ inline void EngineCommon_FillEmitSink(OrderManagerState<F>* oms, const FillEvent
 // [TAG]_[[ENGINE] [BOOT_TIME] [ML_INFERENCE]]
 // [REFERENCE]_[INVARIANT]_[H22]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover; the ensemble's learned state BINDS to state_base_path — D-483 C: LIVE/paper = the model dir, backtest = "" for fresh-only), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
+// [OVERVIEW]_[per-node boot — ring/core init, register, strategy wire, full ML branch (zoo load + validate + confidence + turnover; the ensemble's learned state per `learned` — D-483 C: LIVE/paper BIND it (to EnsembleModelZoo_StateDirOf of the model dir), the backtest FRESH_ONLY), Strategy_InitPerCore, permission=0; PARITY-027/028/029 closure]
 // [REFERENCE]_[DECISION]_[[D-221] [D-483]]
 // [REFERENCE]_[PARITY]_[[PARITY-3] [PARITY-12] [PARITY-27] [PARITY-28] [PARITY-29]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-4]
@@ -1236,7 +1237,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                                       NodeModelZoo<F>* zoo_ptr,        // nullable: non-ML OR alloc-failed
                                       EnsembleModelZoo<F>* ezoo_ptr,   // nullable: same
                                       Money node_balance,             // caller-precomputed (O2 bytewise-identical)
-                                      const char* state_base_path) {  // D-483 C: dir learned state BINDS to ("" = none — the backtest)
+                                      EzooLearnedState learned) {   // D-483 C: BIND (LIVE / paper) or FRESH_ONLY (the backtest)
     // -------- Step 1-4: unconditional per-core init (per Step A.4 CSV ordering) --------
     //   LIVE :909, BACKTEST :252 — SPSC ring init for producer→hot path
     SPSCRing_Init(&tick_ring);
@@ -1381,7 +1382,7 @@ inline void EngineCommon_BootPerCore(const ControllerConfig<F>& cfg,
                         ezoo_ptr->exit_predictor_count);
                 EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, c,
                                                    cfg.node_model_dir[c],
-                                                   state_base_path);   // D-483 C — LIVE: the model dir; BACKTEST: ""
+                                                   learned);   // D-483 C — LIVE: BIND; BACKTEST: FRESH_ONLY
                 // PARITY-046 close (2026-09-03) — the ensemble's strict-mode refusal, the SAME
                 // shape the single-zoo path has above (Free + null handle + LOAD_FAILED): the
                 // verify_expected post-load row counts the per-horizon expected-record

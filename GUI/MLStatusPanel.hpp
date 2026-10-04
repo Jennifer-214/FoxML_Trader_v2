@@ -587,11 +587,12 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                                "bandit state: PERSISTENCE OFF",
                                "This node's Exp3 / Thompson learned state is NOT being saved or loaded.\n"
                                "Its state dir (node_<N>_model_dir) is HELD by another node or process\n"
-                               "(two nodes on one dir, or a backtest on the paper engine's dir) or is\n"
-                               "UNWRITABLE. The node trades on its in-memory weights; nothing carries\n"
-                               "over at shutdown. The boot log / health.jsonl 'bandit_state' line says which.\n"
-                               "Operator action: give each ML node its own node_<N>_model_dir\n"
-                               "(TECH_DEBT-331 / D-483), or fix the dir's permissions.",
+                               "(another ML node on that dir, a suite training run writing that family,\n"
+                               "or a Past Runs delete) or is UNWRITABLE. It loaded no learned state and\n"
+                               "saves none; it trades on its in-memory weights. The boot log /\n"
+                               "health.jsonl 'bandit_state' line says which. Operator action: give each\n"
+                               "ML node its own node_<N>_model_dir (TECH_DEBT-331 / D-483); restart after\n"
+                               "a training run on that family ends; or fix the dir's permissions.",
                                FoxmlColors::yellow);
                     render_bit(FAILURE_MASK_build_flags_drift,
                                "build: FLAG DRIFT",

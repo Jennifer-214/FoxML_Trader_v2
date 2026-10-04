@@ -332,7 +332,7 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
         // ML branch (load/init/post-load/validate/overlay/ConfidenceScorer + NEW
         // BindCompositeCfg + NEW RollingTurnover_Init) + NEW Strategy_InitPerCore +
         // SetPermission.
-        // D-483 C (2026-09-04, the process dimension): state_base_path is "" — the
+        // D-483 C (2026-09-04, the process dimension): FRESH_ONLY — the
         // backtest binds NO state dir, so it loads NO learned state from the model
         // tree and saves NONE (the periodic saver, the pending flush and the old
         // completion save below all key off the bound path, which stays empty).
@@ -343,7 +343,7 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
                                   Money{ money_from_double_payload(node_balance) },
-                                  /*state_base_path=*/"");
+                                  EzooLearnedState::FRESH_ONLY);
 
         // Post-helper BACKTEST-only operator override (Decision B external wrapper).
         // v5.10.0a.next.1 — operator-explicit prior path. With D-483 C this is the

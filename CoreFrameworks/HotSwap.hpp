@@ -210,7 +210,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     if (pre_swap_ezoo->state_lock_fd >= 0) {
         char old_state_dir[sizeof(pre_swap_ezoo->bandit_save_path)];
         if (EnsembleModelZoo_DeriveStateDir(pre_swap_ezoo, old_state_dir, sizeof(old_state_dir)) &&
-            FoxDir_SameDir(old_state_dir, new_path)) {
+            FoxDir_SameDir(old_state_dir, EnsembleModelZoo_StateDirOf(new_path))) {   // the bind's own rule
             new_ezoo->state_lock_fd = fcntl(pre_swap_ezoo->state_lock_fd, F_DUPFD_CLOEXEC, 0);
         }
     }
@@ -221,7 +221,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // state dir binds to new_path (LIVE/paper semantics — the same dir the boot
     // sister binds; E.1.5 B re-homes both).
     // ────────────────────────────────────────────────────────────────────
-    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path, new_path);
+    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path, EzooLearnedState::BIND);
 
     // ────────────────────────────────────────────────────────────────────
     // (4b) D-483 C — a swap INTO a state dir another node or process holds is
@@ -232,10 +232,13 @@ inline int HotSwap_ShadowLoad_Ensemble(
     if (BITMAP_IS_SET(new_ezoo->init_flags, MASK_EZOO_STATE_DIR_CONTENDED)) {
         fprintf(stderr,
             "[hot_swap] ensemble node %d REFUSED: the state dir under %s is held by "
-            "another node or process (D-483 / TECH_DEBT-331); pre-swap state preserved\n",
+            "another node or process — another ML node, a training run writing that family, or a Past Runs "
+            "delete in progress (D-483 / TECH_DEBT-331); pre-swap state preserved\n",
             node_idx, new_path);
         Health_Log(HEALTH_WARN, "hot_swap", node_idx,
-                   "swap into %s REFUSED: state dir held by another node or process", new_path);
+                   "swap into %s REFUSED: state dir held by another node or process (an ML node, a training run, or a "
+                   "Past Runs delete)",
+                   new_path);
         EnsembleModelZoo_Free(new_ezoo);
         free(new_ezoo);
         return -5;

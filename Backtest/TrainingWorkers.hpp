@@ -4,7 +4,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code Every entry requires the caller's suite run lease, checked ONCE at its start — without it nothing is written (D-503).]
+// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code. Every entry requires the caller's suite run lease, checked ONCE at its start — without it nothing is written (D-503); a run writes its model family only under the family's publish lock (D-483) — the run takes it, one horizon verifies its caller's.]
 // [CONTAINS]
 //   - [STRUCT]_[TrainingStatusLine]
 //   - [FUNCTION]_[TrainingStatusLine_Set]
@@ -25,7 +25,8 @@
 //   - [FUNCTION]_[TrainingWorkers_WallClockUs]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //   - [FUNCTION]_[TrainingWorkers_WriteSummary]
-//   - [ENUM]_[TrainingCoreStatus]
+//   - [ENUM]_[TrainingCoreStatus]   (TrainingCoreStatus_Name / _Resource, TrainingWorkers_WorkerSaw / _RunSaw ride)
+//   - [FUNCTION]_[TrainingWorkers_FamilyDir]   (TrainingWorkers_HoldsFamilyLock rides)
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
 //   - [STRUCT]_[TrainingPool]
 //   - [FUNCTION]_[TrainingWorkers_RunPool]   (TrainingWorkers_PoolWorker rides)
@@ -73,7 +74,7 @@
 
 #include "BacktestEngine.hpp"                  // BacktestResults / BacktestRunConfig / FullValidationResults + the label and validation passes
 #include "../ML_Headers/ModelPathSchema.hpp"   // D-431 nested layout — the path-grammar SSoT
-#include "../MemHeaders/DirCreate.hpp"         // FoxDir_CreateParents (family + horizon chain)
+#include "../MemHeaders/DirCreate.hpp"         // FoxDir_CreateParents (family + horizon chain) + the family's publish lock (D-483)
 #include "SuiteLease.hpp"                      // the suite run lease every entry checks first (D-503) + SuiteCancel_Requested, the ONE cancel-word reader (L2)
 #include "SuiteStartGates.hpp"                 // StartGate_FirstBadHorizon — the horizons a run may train (M1 / NF-5)
 #include <errno.h>
@@ -440,6 +441,7 @@ struct TrainingHorizonJob {
     volatile int*          done;         // the run's horizons-finished channel
     TrainingHorizonOutcome outcome;      // written by the worker, read by the orchestrator AFTER the join
     uint64_t               lease;        // the run's lease token — each horizon checks it again (a public entry)
+    int                    family_lock_fd; // the run's family publish lock — each horizon verifies it (a public entry)
 };
 // BacktestResults + BacktestRunConfig make the job 64-aligned (ControllerConfig's alignas(64) PerNodeCfg),
 // so it comes from TrainingWorkers_AllocZeroed, never malloc / calloc. At namespace scope on purpose: it
@@ -888,11 +890,12 @@ inline void TrainingWorkers_WriteSummary(FILE* sf, const TrainingHorizonRequest&
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[a producer-core entry's status (D-503) — its zero REFUSES (no lease: nothing written); RAN says only that the core ran]
+// [OVERVIEW]_[a producer-core entry's status (D-503) — its zero REFUSES (no lease: nothing written); REFUSED_PUBLISH_LOCK — the model family is held elsewhere (D-483: nothing written); RAN says only that the core ran]
 //======================================================================
 // The core requires the suite run lease (D-503 — so E.2's headless verbs take the same lease through the same API
 // Backtest_Run does): every entry — the multi-horizon run, one horizon, Full Validation — checks it FIRST and, without it,
-// writes nothing. A refusal over a RESOURCE the call must own (the lease) is a status — a caller can wait and retry it; a
+// writes nothing. A refusal over a RESOURCE the call must own (the lease; the model family's publish lock — D-483, MP-6
+// (3c)) is a status — a caller can wait and retry it; a
 // refusal of the INPUT, and the run's outcome (done, cancelled, failed), are the sink's and the result's, never a second
 // copy here. Its zero refuses, as BacktestRunStatus's does — an unset status never reads as a run. Never persisted, never
 // logged as a number: a caller maps it by name.
@@ -902,14 +905,44 @@ inline void TrainingWorkers_WriteSummary(FILE* sf, const TrainingHorizonRequest&
 enum [[nodiscard]] TrainingCoreStatus : uint8_t {
     TRAINING_CORE_REFUSED_NO_LEASE = 0,   // the caller's token does not hold the suite run lease — nothing written
     TRAINING_CORE_RAN              = 1,   // the core ran; its outcome is in the sink and the result
+    TRAINING_CORE_REFUSED_PUBLISH_LOCK = 2,   // the model family's publish lock is held elsewhere (D-483) — or, for one
+                                              // horizon, the caller's descriptor does not hold it — nothing written
 };
 static_assert(TRAINING_CORE_REFUSED_NO_LEASE == 0, "the zero status refuses — an unset status never reads as a run");
 inline const char* TrainingCoreStatus_Name(uint8_t s) {
     switch (s) {
         case TRAINING_CORE_REFUSED_NO_LEASE: return "refused: not the holder of the suite run lease";
         case TRAINING_CORE_RAN:              return "ran";
+        case TRAINING_CORE_REFUSED_PUBLISH_LOCK:
+            return "refused: the model family's publish lock is not this call's (held elsewhere — or, for one horizon, "
+                   "not held by the descriptor it was given)";
         default:                             return "unknown status";
     }
+}
+// The resource a refusal is over — what a holder's LOUD report says it was refused (SuiteLease_ReportLostByHolder);
+// never a status's name ("was refused refused: …")
+inline const char* TrainingCoreStatus_Resource(uint8_t s) {
+    switch (s) {
+        case TRAINING_CORE_REFUSED_NO_LEASE:     return "the suite run lease";
+        case TRAINING_CORE_REFUSED_PUBLISH_LOCK: return "its model family's publish lock";
+        default:                                 return "a resource no rule names (an unclassified status)";
+    }
+}
+// What a funnel worker does with its core's status. The LEASE's refusal is the funnel's invariant broken (it handed the
+// worker the lease) — LOUD; a held model family is an operator's ordinary refusal the core has already said, visibly —
+// nothing more here, never a CRITICAL. The DEFAULT is LOUD: a status no case here classifies makes noise, never
+// silence. One rule for both workers.
+inline void TrainingWorkers_WorkerSaw(const char* worker, TrainingCoreStatus st, uint64_t lease) {
+    switch (st) {
+        case TRAINING_CORE_RAN:                  return;   // the outcome is the sink's and the result's
+        case TRAINING_CORE_REFUSED_PUBLISH_LOCK: return;   // said on the run line / the validation line
+        default: SuiteLease_ReportLostByHolder(worker, lease, TrainingCoreStatus_Resource(st)); return;
+    }
+}
+// What the run does with one horizon's status: it holds the lease AND the family's lock for the whole call, so ANY
+// refusal is its own invariant broken — LOUD. Both dispatch modes (the pool's job, the serial loop) through this rule.
+inline void TrainingWorkers_RunSaw(const char* where, TrainingCoreStatus st, uint64_t lease) {
+    if (st != TRAINING_CORE_RAN) SuiteLease_ReportLostByHolder(where, lease, TrainingCoreStatus_Resource(st));
 }
 //======================================================================
 // [END_CODE]
@@ -918,11 +951,60 @@ inline const char* TrainingCoreStatus_Name(uint8_t s) {
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[TrainingWorkers_FamilyDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the FAMILY a run writes (D-431) — <models_root>/<the class tree of the run's PRIMARY kind>/<run name>, through the schema's builder — and the STRICT proof that a descriptor holds its publish lock (D-483): the same file, an exclusive holder, and that holder is the descriptor]
+// [REFERENCE]_[DECISION]_[[D-431] [D-483] [D-503]]
+//======================================================================
+// The family holds the run's horizon_<N> dirs and the bundle-scoped state; its lock is <family>/.foxml_state.lock. ONE
+// rule for a horizon's directories, the run's lock and the lock's proof — the class tree from the PRIMARY kind, never a
+// horizon's own (S2-F4: per-horizon trees fragmented a mixed family).
+//======================================================================
+// [CODE]
+//======================================================================
+inline bool TrainingWorkers_FamilyDir(char* out, size_t cap, const char* models_root, int primary_label_type,
+                                      const char* run_name) {
+    return ModelPath_FamilyDir(out, cap, models_root, Training_ResolveClassTree(primary_label_type), run_name);
+}
+// Does descriptor `fd` hold `family`'s publish lock? A public entry VERIFIES its caller's proof — never assumes it, and
+// never acquires a FREE lock for it (MP-6 (3c-1)'s review, F10: a proof that took a free lock hid an unlocked caller,
+// and inside the run re-took a LOST lock silently). Three facts, each necessary:
+//   1. the SAME file — <family>/.foxml_state.lock, by device and inode;
+//   2. an EXCLUSIVE holder exists — a fresh description cannot even share it (only an exclusive lock refuses LOCK_SH);
+//   3. that holder is THIS description — re-taking LOCK_EX on it is a no-op only for the holder (another description's
+//      lock refuses it).
+// The one window: a FOREIGN holder that releases between 2 and 3 hands the lock to the caller at 3 — still one exclusive
+// writer, never a free lock taken. (A strictly non-acquiring check would read /proc/self/fdinfo's lock lines.)
+inline bool TrainingWorkers_HoldsFamilyLock(int fd, const char* family) {
+    if (fd < 0 || !family || !family[0]) return false;
+    char path[512];
+    const int n = snprintf(path, sizeof(path), "%s/%s", family, MODEL_STATE_LOCK_FILE);
+    if (n <= 0 || n >= (int)sizeof(path)) return false;
+    struct stat by_fd, by_path;
+    if (fstat(fd, &by_fd) != 0 || stat(path, &by_path) != 0) return false;
+    if (by_fd.st_dev != by_path.st_dev || by_fd.st_ino != by_path.st_ino) return false;
+    const int probe = open(path, O_RDONLY | O_CLOEXEC);
+    if (probe < 0) return false;
+    const int shared = flock(probe, LOCK_SH | LOCK_NB);
+    const int why    = shared == 0 ? 0 : errno;
+    close(probe);   // drops a shared lock the probe took
+    if (shared == 0 || (why != EWOULDBLOCK && why != EAGAIN)) return false;   // no exclusive holder (or no answer)
+    return flock(fd, LOCK_EX | LOCK_NB) == 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[TrainingWorkers_FamilyDir]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingWorkers_RunHorizon]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; otherwise RAN, the outcome in the caller's slot]
+// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; then the caller's proof of its model family's publish lock (D-483 — a descriptor on <family>/.foxml_state.lock holding its flock), verified SECOND: without it REFUSED_PUBLISH_LOCK, nothing written; otherwise RAN, the outcome in the caller's slot]
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // v5.11.41 — the per-horizon FV helper, moved here by MP-1 (it was mh_run_one_horizon_fv in the
@@ -936,6 +1018,7 @@ inline const char* TrainingCoreStatus_Name(uint8_t s) {
 // [CODE]
 //======================================================================
 inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
+                                                     int family_lock_fd,
                                                      const TrainingHorizonRequest& req,
                                                      BacktestResults* view,
                                                      BacktestRunConfig* run_cfg,
@@ -946,6 +1029,13 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
         fprintf(stderr, "[mh-train] horizon %d REFUSED: the caller's token %llu does not hold the suite run lease — "
                         "nothing written\n", req.horizon_ticks, (unsigned long long)lease);
         return TRAINING_CORE_REFUSED_NO_LEASE;
+    }
+    char family_dir[340];
+    if (!TrainingWorkers_FamilyDir(family_dir, sizeof(family_dir), req.models_root, req.primary_label_type, req.run_name) ||
+        !TrainingWorkers_HoldsFamilyLock(family_lock_fd, family_dir)) {   // SECOND: its files sit behind the family lock
+        fprintf(stderr, "[mh-train] horizon %d REFUSED: the caller's descriptor %d does not hold the publish lock of "
+                        "'%s' — nothing written\n", req.horizon_ticks, family_lock_fd, family_dir);
+        return TRAINING_CORE_REFUSED_PUBLISH_LOCK;
     }
     TrainingHorizonOutcome outcome{};
     if (!view || !run_cfg || !result || !outcome_out) {
@@ -971,7 +1061,6 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
     const float               snap_gap_threshold     = req.gap_threshold;
     const float               snap_held_out_fraction = req.held_out_fraction;
     const char*               snap_auto_stamp_secret = req.stamp_secret;
-    const int                 primary_label_type     = req.primary_label_type;
     const int                 labels_precomputed     = req.labels_precomputed;
     const int                 training_side          = req.training_side;
     const int                 horizon_count          = req.horizon_count;
@@ -1051,9 +1140,6 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
     // E.1.2.C 3-role — side selects the ROLE FILE via the extracted helper
     // (side=1 => "exit", saved CO-LOCATED; label kind stays free per (b)).
     const char* role = Training_ResolveRole(label_type, training_side);
-    // D-431 nested layout — run_subdir derives from the RUN's PRIMARY kind (Training_ResolveClassTree — the panel's
-    // "Will write to" preview calls the same rule).
-    const char* run_subdir = Training_ResolveClassTree(primary_label_type);
     // E.1.2.C 3-retire (2026-08-20) — the models/exit/ SIDE TREE is RETIRED:
     // no loader ever walked it (PARITY-044); exit models land CO-LOCATED in
     // the same per-horizon dirs (side flips the ROLE FILE, next commit).
@@ -1061,10 +1147,10 @@ inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
     // D-431 — the FAMILY node is the unit: models/<class>/<family>/ holds
     // horizon_<N> children + the bundle-scoped state files. Every future
     // family is born with its bundle node (the treadmill's structural end);
-    // FoxDir_CreateParents builds the whole chain.
-    char family_dir[340];
-    snprintf(family_dir, sizeof(family_dir), "%s/%s/%s",
-             req.models_root, run_subdir, run_name);
+    // FoxDir_CreateParents builds the whole chain. The family is `family_dir`,
+    // from the entry: its class tree derives from the RUN's PRIMARY kind
+    // (TrainingWorkers_FamilyDir — the panel's "Will write to" preview calls
+    // the same Training_ResolveClassTree), and its lock's proof was verified there.
     char horizon_dir[360];
     ModelPath_HorizonDir(horizon_dir, sizeof(horizon_dir),
                          family_dir, (long)horizon_ticks);
@@ -1513,7 +1599,7 @@ inline int TrainingWorkers_RunPool(TrainingPoolFn fn, void* ctx, int count, int 
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[train a multi-horizon model grid, serial or parallel — one batched label pass, then one TrainingWorkers_RunHorizon per horizon over a private dataset view + run-config copy. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; otherwise RAN — fills the caller's result, publishes completion LAST]
+// [OVERVIEW]_[train a multi-horizon model grid, serial or parallel — one batched label pass, then one TrainingWorkers_RunHorizon per horizon over a private dataset view + run-config copy. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written. Takes its model family's publish lock (D-483) right before its first write into the family and holds it to the last, each horizon verifying it: held elsewhere (an engine's ML node bound to it, another training run, or a Past Runs delete in progress) REFUSED_PUBLISH_LOCK, said on the run line, nothing written; a run cancelled during its label pass takes no lock and makes no family; otherwise RAN — fills the caller's result, publishes completion LAST]
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
@@ -1527,10 +1613,11 @@ inline void* TrainingWorkers_HorizonThread(void* arg) {
     // whole run) — publish the horizon on entry; the completion count is bumped atomically below
     // because N workers finish out of order and a plain increment from several threads loses counts.
     TrainingSink_Set(job->current, job->req.horizon_ticks);
-    // the run checked the lease at its entry and holds it for the call: a refusal here is the funnel's invariant broken
-    if (TrainingWorkers_RunHorizon(job->lease, job->req, &job->view, &job->run_cfg, job->sink, job->result,
-                                   &job->outcome) != TRAINING_CORE_RAN)
-        SuiteLease_ReportLostByHolder("a multi-horizon run's pooled horizon", job->lease);
+    // the run checked the lease at its entry and took the family's lock, and holds both for the call (TrainingWorkers_RunSaw)
+    TrainingWorkers_RunSaw("a multi-horizon run's pooled horizon",
+                           TrainingWorkers_RunHorizon(job->lease, job->family_lock_fd, job->req, &job->view, &job->run_cfg,
+                                                      job->sink, job->result, &job->outcome),
+                           job->lease);
     if (job->done) __atomic_add_fetch(job->done, 1, __ATOMIC_RELAXED);   // display-only: RELAXED
     return NULL;
 }
@@ -1698,10 +1785,33 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
         }
     }
 
+    // MP-6 (3c) — the family's publish lock (D-483), taken ONCE for the run, right before its first write into the family,
+    // and held to the last; each horizon verifies the run's descriptor. NOT taken when nothing will be written — the lock
+    // provisions its file, so a run whose BATCHED label pass aborted, or that was cancelled during it (the pass takes no
+    // cancel), makes no directory (the no-batch fallback labels inside each horizon, after the lock). flock is per open
+    // file description: a second open in this process would be refused by this one. Held elsewhere — an engine's ML node
+    // bound to the family, another training run, or a Past Runs delete in progress: two writers, so no horizon starts.
+    const bool cancelled = !mh_labels_aborted && SuiteCancel_Requested(sink.cancel);
+    char family[340] = "";
+    int  family_fd   = -1;
+    int  family_lock = -2;   // -2 not taken (nothing will be written) · 1 held · 0 held elsewhere · -1 cannot be locked
+    if (!mh_labels_aborted && !cancelled)
+        family_lock = TrainingWorkers_FamilyDir(family, sizeof(family), req.models_root, req.primary_label_type, run_name)
+                          ? FoxDir_LockExclusive(family, MODEL_STATE_LOCK_FILE, &family_fd) : -1;
+
     if (mh_labels_aborted) {
         for (int h = 0; h < horizon_count; ++h)   // the cancel path's shape: each row says why it never ran
             TrainingSink_Status(sink.horizon[h].status,
                                 "h=%d not started: the label pass aborted (see the log)", req.horizon_ticks[h]);
+    } else if (cancelled) {
+        for (int h = 0; h < horizon_count; ++h)
+            TrainingSink_Status(sink.horizon[h].status, "h=%d not started: the run was cancelled", req.horizon_ticks[h]);
+    } else if (family_lock != 1) {
+        for (int h = 0; h < horizon_count; ++h)
+            TrainingSink_Status(sink.horizon[h].status, family_lock == 0
+                                    ? "h=%d not started: the model family is held elsewhere"
+                                    : "h=%d not started: the model family cannot be locked",
+                                req.horizon_ticks[h]);
     } else if (parallel_mode) {
         fprintf(stderr, "[mh-train] parallel mode: %d horizons on %d workers "
                         "(one single-threaded booster each)\n",
@@ -1757,6 +1867,7 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
             job->current     = sink.current;
             job->done        = sink.done;
             job->lease       = lease;
+            job->family_lock_fd = family_fd;
             jobs[h] = job;
         }
         const int workers = TrainingWorkers_RunPool(TrainingWorkers_PoolJob, jobs, horizon_count, n_parallel);
@@ -1808,10 +1919,12 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
                 TrainingSink_PublishComplete(hs.complete);
                 continue;
             }
-            // the run checked the lease at its entry and holds it for the call: a refusal is the funnel's invariant broken
-            if (TrainingWorkers_RunHorizon(lease, TrainingWorkers_HorizonRequest(req, h, mh_batch_ok), &view, run_cfg,
-                                           hs, &out->horizon[h], &out->outcome[h]) != TRAINING_CORE_RAN)
-                SuiteLease_ReportLostByHolder("a multi-horizon run's horizon", lease);
+            // the run checked the lease at its entry and took the family's lock, and holds both for the call
+            TrainingWorkers_RunSaw("a multi-horizon run's horizon",
+                                   TrainingWorkers_RunHorizon(lease, family_fd,
+                                                              TrainingWorkers_HorizonRequest(req, h, mh_batch_ok), &view,
+                                                              run_cfg, hs, &out->horizon[h], &out->outcome[h]),
+                                   lease);
         }
         view.labels = NULL;
         free(own_labels);
@@ -1830,13 +1943,27 @@ inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
     }
     if (mh_labels_aborted)
         TrainingSink_Status(sink.status, "Multi-horizon: the label pass aborted (see the log) — nothing trained.");
+    else if (cancelled)
+        TrainingSink_Status(sink.status, "Multi-horizon: cancelled during the label pass — nothing trained.");
+    else if (family_lock == 0)
+        TrainingSink_Status(sink.status, "Multi-horizon: the model family %s is held elsewhere — an engine's ML node bound "
+                                         "to it, another training run, or a Past Runs delete in progress (lslocks names "
+                                         "the holder of its %s) — refused, nothing trained; stop it, or train under "
+                                         "another run name.",
+                            family, MODEL_STATE_LOCK_FILE);
+    else if (family_lock != 1)
+        TrainingSink_Status(sink.status, "Multi-horizon: the model family %s cannot be locked (an unwritable or missing "
+                                         "models root, or a path that cannot be named) — refused, nothing trained.",
+                            family);
     else
         TrainingSink_Status(sink.status,
                             "Multi-horizon: %d/%d horizons trained, %d validated (held-out), "
                             "%d stamped. Models in %s/<class>/%s/%s*/.",
                             out->trained, horizon_count, out->validated, out->stamped,
                             req.models_root, run_name, MODEL_HORIZON_PREFIX);
+    FoxDir_Unlock(&family_fd);   // the family's last write is done (-1: nothing held)
     TrainingSink_FinishRun(sink);
+    return family_lock == 0 ? TRAINING_CORE_REFUSED_PUBLISH_LOCK : TRAINING_CORE_RAN;
 #else
     (void)req;
     TrainingWorkers_Refuse(sink, "Multi-horizon: XGBoost not compiled in (build with -DUSE_XGBOOST=ON)");

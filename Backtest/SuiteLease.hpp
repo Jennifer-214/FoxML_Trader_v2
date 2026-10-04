@@ -67,7 +67,7 @@
 //----------------------------------------------------------------------
 // [TAG]_[[BACKTEST] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the lease word (0 = free, else the holder's token), the holder's name for "busy" lines, the last token issued (never reused, so a stale token can never release a later holder), the count of releases refused for a token that does not hold the lease, and when the holder took it (its release line says how long it held)]
+// [OVERVIEW]_[the lease word (0 = free, else the holder's token), the holder's name for "busy" lines, the last token issued (never reused, so a stale token can never release a later holder), the count of releases refused for a token that does not hold the lease, the count of runs refused a resource they hold by construction (the lease; their model family's publish lock — the LOUD family), and when the holder took it (its release line says how long it held)]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -76,8 +76,8 @@ struct alignas(64) SuiteLeaseState {
     const char* volatile holder;         // set by the winning acquirer, cleared by its release — display only
     volatile uint64_t    issued;         // the last token handed out (an atomic add)
     volatile uint64_t    bad_releases;   // a release by a token that does not hold the lease: a bug, counted and printed
-    volatile uint64_t    lost_by_holder; // a run that holds the lease by construction refused for not holding it: the
-                                         // funnel's invariant broke — counted and printed (SuiteLease_ReportLostByHolder)
+    volatile uint64_t    lost_by_holder; // a run refused a resource it holds by construction (the lease; its family's
+                                         // publish lock): the invariant broke — counted and printed (_ReportLostByHolder)
     volatile uint64_t    acquired_ns;    // the monotonic clock when the holder took it — written by the acquirer, read
                                          // by its release (the same thread, or after the funnel's spawn)
 };
@@ -192,13 +192,13 @@ inline uint64_t SuiteLease_TryAcquire(const char* holder, char* refused = nullpt
 //======================================================================
 // [CODE]
 //======================================================================
-// A run that holds the lease BY CONSTRUCTION — a funnel worker, or the training core's per-horizon re-check under its
-// entry's own check — was refused for not holding it: the funnel's invariant broke. LOUD, as a bad release is: counted
-// and printed, never a status line no code may draw (the (3b) review, F3).
-inline void SuiteLease_ReportLostByHolder(const char* where, uint64_t token) {
+// A run that holds a resource BY CONSTRUCTION — a funnel worker its lease, the training core's per-horizon re-check the
+// lease and the family's publish lock its run took — was refused it: the invariant broke. LOUD, as a bad release is:
+// counted and printed, never a status line no code may draw (the (3b) review, F3). `lost` names what was refused.
+inline void SuiteLease_ReportLostByHolder(const char* where, uint64_t token, const char* lost) {
     __atomic_add_fetch(&g_suite_lease.lost_by_holder, 1, __ATOMIC_RELAXED);
-    fprintf(stderr, "[suite-lease] CRITICAL: %s ran on token %llu, which does not hold the lease — the funnel's "
-                    "invariant broke\n", where ? where : "?", (unsigned long long)token);
+    fprintf(stderr, "[suite-lease] CRITICAL: %s (token %llu) was refused %s, which it holds by construction — the "
+                    "invariant broke\n", where ? where : "?", (unsigned long long)token, lost ? lost : "?");
 }
 inline bool SuiteLease_Release(uint64_t token) {
     if (!SuiteLease_HeldBy(token)) {

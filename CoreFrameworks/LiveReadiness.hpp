@@ -398,10 +398,11 @@ inline bool check_live_capital_gated_until_e(const ControllerConfig<F>& cfg,
       "set a WRITABLE health_log_path (e.g. logging/health.jsonl; probed with fopen at boot) — the ring-full fatal record needs a durable channel") \
     /* D-483 C (2026-09-04) — the bind-outcome rows (TECH_DEBT-331). The state-dir bind ran at    */ \
     /* per-node boot; these read its verdict. A node whose learned state is not persisting must    */ \
-    /* not go LIVE silently: CONTENDED = the other node's (or a backtest process's) weights are     */ \
-    /* what it loaded + nothing carries over; UNWRITABLE = nothing carries over. Paper WARNs.       */ \
+    /* not go LIVE silently: CONTENDED = another node, or a training run writing that family, holds */ \
+    /* the dir — this node loaded NO learned state and saves none (the bind runs before the        */ \
+    /* loaders); UNWRITABLE = nothing carries over either. Paper WARNs.                            */ \
     X(no_state_dir_contention,     check_no_state_dir_contention,     LR_SEV_REFUSE, \
-      "another node or process holds an ML node's bandit state dir — give each ML node its own node_<N>_model_dir, and never run a backtest on the paper engine's dir (TECH_DEBT-331 / D-483); persistence is OFF for the contended node until then") \
+      "another node or process holds an ML node's bandit state dir — give each ML node its own node_<N>_model_dir; a suite training run holds the family it writes until the run ends, a Past Runs delete for its walk — restart after it (TECH_DEBT-331 / D-483); persistence is OFF for the contended node until then") \
     X(state_dir_writable,          check_state_dir_writable,          LR_SEV_REFUSE, \
       "an ML node's bandit state dir is UNWRITABLE (its lock file could not be created) — fix the dir's permissions / free disk; persistence is OFF for that node until then")
 

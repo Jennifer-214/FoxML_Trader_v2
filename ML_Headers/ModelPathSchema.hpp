@@ -120,6 +120,51 @@ static inline void ModelPath_HorizonDir(char* buf, size_t buf_size,
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[ModelPath_FamilyDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the ONE family-dir builder — "<models_root>/<class_tree>/<family>", D-431's bundle node; false when the path does not fit. The caller resolves the class tree (Training_ResolveClassTree — a training rule, so it stays in Backtest/)]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool ModelPath_FamilyDir(char* buf, size_t buf_size, const char* models_root, const char* class_tree,
+                                       const char* family) {
+    const int n = snprintf(buf, buf_size, "%s/%s/%s", models_root, class_tree, family);
+    return n > 0 && (size_t)n < buf_size;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelPath_FamilyDir]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[ModelPath_FamilyOfHorizonDir]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [ML_INFERENCE] [GUI]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the family of a horizon dir — its parent, when its last component is a horizon child (the ONE matcher; trailing slashes ignored); false when it is not one (a retired flat run dir, a path with no parent) or the path does not fit]
+//======================================================================
+// [CODE]
+//======================================================================
+static inline bool ModelPath_FamilyOfHorizonDir(const char* horizon_dir, char* buf, size_t buf_size) {
+    const int n = snprintf(buf, buf_size, "%s", horizon_dir);
+    if (n <= 0 || (size_t)n >= buf_size) return false;
+    size_t len = (size_t)n;
+    while (len > 1 && buf[len - 1] == '/') buf[--len] = '\0';   // ".../horizon_5/" names horizon_5
+    char* slash = strrchr(buf, '/');
+    if (!slash || slash == buf || ModelPath_ParseHorizonChild(slash + 1) < 0) return false;
+    *slash = '\0';
+    return true;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[ModelPath_FamilyOfHorizonDir]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[ModelPath_HorizonOfModelFile]
 //----------------------------------------------------------------------
 // [TAG]_[[ML_INFERENCE] [GUI] [BACKTEST]]
@@ -184,11 +229,15 @@ static const char MODEL_STATE_FILE_BANDIT[]         = "bandit_state.json";
 static const char MODEL_STATE_FILE_EXIT_BANDIT[]    = "exit_bandit_state.json";
 static const char MODEL_STATE_FILE_BUY_THOMPSON[]   = "buy_thompson_state.json";
 static const char MODEL_STATE_FILE_EXIT_THOMPSON[]  = "exit_thompson_state.json";
-// D-483 C (2026-09-04, the process dimension) — the state dir's exclusive-lock
-// file. Held (flock LOCK_EX|LOCK_NB on an O_CLOEXEC descriptor) by the ONE
-// process+node that owns the four state files above, for as long as its ezoo is
-// bound; a second binder REFUSES (persistence OFF, loud) instead of the
-// last-writer-wins clobber TECH_DEBT-331 recorded. A dotfile, so the bundle
+// D-483 C (2026-09-04, the process dimension) — the FAMILY's exclusive-lock
+// file (D-431's bundle node). Held (flock LOCK_EX|LOCK_NB on an O_CLOEXEC
+// descriptor) by the family's writers: the ONE process+node whose ezoo is
+// bound to it (the four state files above, for as long as it is bound), a
+// training run writing its models (MP-6 (3c), D-503 — first write to last;
+// Full Validation's re-stamp joins at (3c-2)), and a Past Runs delete for the
+// length of its walk. A second taker REFUSES —
+// persistence OFF / the run refused / the delete refused, each loud — instead
+// of the last-writer-wins clobber TECH_DEBT-331 recorded. A dotfile, so the bundle
 // scanner never lists it (ModelBundleScan skips '.'-leading entries). H21
 // on-disk identifier: ledgered in tools/identifier_ledger.txt — rename by
 // tombstone + new name, never in place.

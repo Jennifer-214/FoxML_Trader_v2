@@ -3805,6 +3805,33 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 }
 
 //======================================================================
+// [FUNCTION]_[EnsembleModelZoo_StateDirOf]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE] [BOOT_TIME]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[D-483 C — the ONE rule for the dir a node's learned state binds to: the dir its models came from (the family node, D-431). Its only readers: EnsembleModelZoo_PostLoadSetup's bind (callers pass EzooLearnedState, never a path) and hot-swap's same-dir handover; E.1.5 B re-homes the state HERE]
+// [REFERENCE]_[DECISION]_[D-483]
+//======================================================================
+// The family's lock is also what keeps a training run from rewriting a family a node serves (MP-6 (3c), D-503): a cell
+// binds a real ensemble through EnsembleModelZoo_PostLoadSetup and asserts the run refuses. Re-homing the state (a
+// node-owned dir gains the node id here) must keep a hold on the family the node serves, or retire that exclusion
+// consciously, with that cell.
+//======================================================================
+// [CODE]
+//======================================================================
+// What a node does with its learned state at post-load (D-483 C): BIND it to the dir the rule above names (LIVE / paper
+// boot, hot-swap), or FRESH_ONLY — no bind, no load, no save (the backtest: a pure function of its inputs). A TYPE, not
+// a path or a bool: no caller can bind a dir the rule did not name, and a stale string argument does not compile (a
+// string converts to bool silently).
+enum class EzooLearnedState : uint8_t { FRESH_ONLY = 0, BIND = 1 };
+inline const char* EnsembleModelZoo_StateDirOf(const char* model_dir) { return model_dir; }
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EnsembleModelZoo_StateDirOf]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[EnsembleModelZoo_BindStateDir]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PERSISTENCE] [ML_INFERENCE] [BOOT_TIME]]
@@ -3843,7 +3870,9 @@ inline int EnsembleModelZoo_BindStateDir(EnsembleModelZoo<F>* ezoo, const char* 
                                                    : MASK_EZOO_STATE_DIR_UNWRITABLE);
             ezoo->bandit_save_path[0] = '\0';   // persistence OFF: no load, no save
             const char* why = contended
-                ? "held by another node or process — two writers on one state dir (TECH_DEBT-331 / D-483)"
+                ? "held by another node or process — another ML node on this dir, a training run writing this "
+                  "family, or a Past Runs delete in progress (lslocks names it): two writers on one state dir "
+                  "(TECH_DEBT-331 / D-483)"
                 : "lock file cannot be created (unwritable dir / no space / bad path)";
             fprintf(stderr, "[ensemble] node %d: bandit state dir '%s' NOT bound — %s; "
                             "persistence OFF for this node (no state load, no state save)\n",
@@ -4262,8 +4291,8 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
     /* D-483 C (2026-09-04) — BIND the state dir (exclusive lock; the ONE writer of         */ \
     /* bandit_save_path) BEFORE any state loader runs. The four load rows below read        */ \
     /* state_dir — the BOUND dir, empty when unbound — so a refused node loads NOTHING of    */ \
-    /* another node's state (not just buy-Exp3) and the backtest ("" state_base_path: no    */ \
-    /* bind, no load, no save) is a pure function of its inputs + the explicit prior overlay. */ \
+    /* another holder's state (not just buy-Exp3) and the backtest (FRESH_ONLY: no bind, no */ \
+    /* load, no save) is a pure function of its inputs + the explicit prior overlay.        */ \
     X(bind_state_dir,      ensemble_post_load_bind_state_dir(ezoo, state_base_path, \
                                node_id, state_dir, sizeof(state_dir)))           \
     X(load_bandit_state,   EnsembleModelZoo_LoadBanditState(ezoo,                \
@@ -4313,10 +4342,10 @@ inline int EnsembleModelZoo_VerifyExpected(EnsembleModelZoo<F>* ezoo,
 // (count = FOREACH_ENSEMBLE_POST_LOAD_COUNT).
 // Boot, backtest, hot-swap call this; never inline the steps directly.
 //
-// base_run_path  = the MODEL dir (verify_expected reads the horizon dirs under it).
-// state_base_path = the dir learned state is BOUND to (D-483 C): LIVE/paper pass the
-//                   node's model dir (E.1.5 B re-homes it); the BACKTEST passes "" —
-//                   no bind, no state load, no state save (fresh-only). nullptr = "".
+// base_run_path = the MODEL dir (verify_expected reads the horizon dirs under it).
+// learned       = BIND: the learned state binds to EnsembleModelZoo_StateDirOf(base_run_path)
+//                 (D-483 C — LIVE / paper boot, hot-swap; E.1.5 B re-homes it in that rule);
+//                 FRESH_ONLY: no bind, no state load, no state save (the BACKTEST).
 //
 // Returns: void. Does NOT call ValidateAgainstCfg — that's the caller's
 // responsibility (it takes both zoo + ezoo as combined check).
@@ -4328,9 +4357,9 @@ inline void EnsembleModelZoo_PostLoadSetup(EnsembleModelZoo<F>* ezoo,
                                              const ControllerConfig<F>& cfg,
                                              int node_id,
                                              const char* base_run_path,
-                                             const char* state_base_path) {
+                                             EzooLearnedState learned) {
     if (!ezoo || !base_run_path) return;
-    if (!state_base_path) state_base_path = "";
+    const char* state_base_path = learned == EzooLearnedState::BIND ? EnsembleModelZoo_StateDirOf(base_run_path) : "";
     char state_dir[sizeof(ezoo->bandit_save_path)];   // filled by the bind_state_dir row
     state_dir[0] = '\0';
 #define X(name, expr) expr;
