@@ -167,7 +167,7 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[INGEST-0 (D-511 call 7) — does a data file hold MILLISECOND timestamps (a Binance dump from before 2025-01-01)? the majority of its first trades decides; the replay refuses such a corpus until INGEST-a's one reader normalizes it, and that leaf deletes this]
+// [OVERVIEW]_[INGEST-0 (D-511 call 7) — does a data file hold MILLISECOND timestamps (a Binance dump from before 2025-01-01)? the majority of the votes in its first nine lines decides; the replay refuses such a corpus until INGEST-a's one reader normalizes it, and that leaf deletes this]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -1777,9 +1777,10 @@ static inline void BacktestResults_DropSamples(BacktestResults *r, const char *w
 // the lease is refused BEFORE anything is reset (a refusal never wipes the
 // results another run owns). The status names every outcome — the lease
 // refusal and BacktestSharded_Run's no-run returns (cfg refused, millisecond-era
-// data refused — INGEST-0, allocation failed) — and every caller handles it by name: the Run Control workers
-// skip their post-processing, the sweep never records the cell, the tests
-// take a lease. The label post-pass runs only after a run that happened.
+// data refused — INGEST-0, allocation failed) — and every caller handles it
+// by name: the Run Control workers skip their post-processing, the sweep never
+// records the cell, the tests take a lease. The label post-pass runs only
+// after a run that happened.
 //
 // What still works that used to live in the legacy body:
 //   - `out_snapshot` populate: `BacktestSharded_Run` calls

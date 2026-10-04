@@ -324,8 +324,10 @@ static_assert(alignof(RunControlState) == 64, "RunControlState's alignment chang
 // [END_STRUCT]_[RunControlState]
 //======================================================================
 
-// A finished Run Control run whose backtest actually ran — the ONE predicate every results display reads (the panel,
-// the dashboard, the trade history, the window title): a refused or failed run is done but has no results to show.
+// A finished Run Control run whose backtest actually ran — the ONE predicate the results displays go by (the panels'
+// result lines, the dashboard, the trade refreshes, the window title, Past Runs' save): a refused or failed run is done
+// but has no results to show. The panels that draw the run's SNAPSHOT draw the GUI's copy instead, which every run's
+// start retires (RunControl_ForgetDisplay) — so after a run that did not happen they show nothing either.
 static inline bool RunControl_HasRun(const RunControlState *rc) {
     return SuiteJob_Done(&rc->job) && rc->last_status == BACKTEST_RUN_DONE;
 }
@@ -492,11 +494,14 @@ struct BacktestWorkerArgs {
 //----------------------------------------------------------------------
 // [TAG]_[[GUI] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[a Run Control run's start, in its worker, holding the lease: forget the display that described the last results — the samples snapshot, the per-horizon collect table, the chart — just before Backtest_Run resets those results]
+// [OVERVIEW]_[a Run Control run's start, in its worker, holding the lease: forget the display that described the last results — the samples snapshot, the per-horizon collect table, the chart — just before Backtest_Run resets those results — and the run's snapshot]
 //======================================================================
 // Every Run Control run replaces the shared results, so every one retires what described them — Run Backtest used to
-// leave the last collect's per-horizon table standing over results it had just reset. The GUI reads the snapshots only
-// while the job shows no run, and the chart under its own mutex, so the worker can write them here.
+// leave the last collect's per-horizon table standing over results it had just reset, and a run that did not happen
+// left the last one's snapshot for the GUI to adopt at rest: the engine header, the ML status and the P&L and volume
+// charts drew a run that was gone (INGEST-0's review, F5(d)); the replay fills the snapshot only at a run's end. The GUI
+// reads the snapshots only while the job shows no run, and the chart under its own mutex, so the worker can write them
+// here.
 //======================================================================
 // [CODE]
 //======================================================================
@@ -505,6 +510,8 @@ static inline void RunControl_ForgetDisplay(RunControlState *state) {
     state->mh_collect_snap_count = 0;
     if (state->candle_acc)
         CandleAccumulator_Reset(state->candle_acc);
+    if (state->snapshot)
+        memset(state->snapshot, 0, sizeof(*state->snapshot));
 }
 //======================================================================
 // [END_CODE]

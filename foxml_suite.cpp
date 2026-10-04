@@ -503,6 +503,9 @@ int main(int argc, char *argv[]) {
             snprintf(title, sizeof(title), "foxml suite  |  P&L $%+.2f  |  %u trades",
                      run_control.results.stats.total_pnl, run_control.results.stats.total_trades);
             SDL_SetWindowTitle(window, title);
+        } else {
+            // no run to show (none yet, refused, not started): the title drops the last run's numbers with the rest
+            SDL_SetWindowTitle(window, "foxml suite");
         }
 
         //==============================================================================================

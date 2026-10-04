@@ -168,13 +168,14 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
         return BACKTEST_RUN_CFG_REFUSED;
     }
 
-    // INGEST-0 (D-511 call 7) — a corpus holding a MILLISECOND-era Binance dump is REFUSED before anything runs: this replay
-    // stores the timestamp column raw, while every time feature, the purge's time span and the time-gated controls read
-    // microseconds, so a run over it would be 1000x off and look fine (A-REPLAY's F-3). The WHOLE corpus is refused, never
-    // a run that skips the file, and every file is read (nine lines each) so the log names how many and where they start
-    // and end. AFTER the reset above, as the cfg refusals are: the worker has already recorded this request as what the
-    // results hold, so they must hold nothing (CS-280 — the dataset owning its corpus — lets every refusal move ahead of the
-    // reset). A refusal, not a normalization: INGEST-a's one reader (TickTape) normalizes and deletes this check.
+    // INGEST-0 (D-511 call 7) — a corpus holding a MILLISECOND-era Binance dump is REFUSED before any tick is replayed:
+    // this replay stores the timestamp column raw, while every time feature, the purge's time span and the time-gated
+    // controls read microseconds, so a run over it would be 1000x off and look fine (A-REPLAY's F-3). The WHOLE corpus
+    // is refused, never a run that skips the file, and every file is read (nine lines each) so the log names how many
+    // and where they start and end. AFTER the reset above, as the cfg refusals are: the worker has already recorded
+    // this request as what the results hold, so they must hold nothing (CS-280 — the dataset owning its corpus — lets
+    // every refusal move ahead of the reset). A refusal, not a normalization: INGEST-a's one reader (TickTape)
+    // normalizes and deletes this check.
     int ms_files = 0, ms_first = -1, ms_last = -1;
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         if (BacktestData_MillisecondDump(run_cfg->data_paths[f])) {
