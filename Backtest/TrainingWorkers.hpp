@@ -264,7 +264,7 @@ struct TrainingRunSink {
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[248B]
+// [SIZE]_[240B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[4]
 // [STRADDLE]_[none]
@@ -560,7 +560,7 @@ struct TrainingFvSink {
 //======================================================================
 // [DERIVED]
 // [UPDATED]_[2026-10-03]
-// [SIZE]_[40B]
+// [SIZE]_[32B]
 // [ALIGN]_[8]
 // [CACHE_LINES]_[1]
 // [STRADDLE]_[none]
