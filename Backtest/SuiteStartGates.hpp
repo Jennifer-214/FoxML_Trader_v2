@@ -215,6 +215,9 @@ template <typename T, typename Range>
 inline SuiteCsvParse SuiteCsv_Parse(const char* csv, T* out, int cap, Range range) {
     SuiteCsvParse r = {};
     r.cap = cap;
+    // every slot zero first: one this parse does not write reads 0, never an earlier parse's value — an emptied field
+    // used to keep its last list behind a count of 0, so a reader of slot 0 got a horizon nobody typed any more
+    for (int i = 0; i < cap; ++i) out[i] = T{};
     const char* p       = csv ? csv : "";
     const char* tok_end = p;
     auto stop_at = [&](int why) {

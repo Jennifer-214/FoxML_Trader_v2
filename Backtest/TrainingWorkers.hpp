@@ -246,7 +246,7 @@ struct TrainingHorizonDisplay {
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the run's display + control channel — run status, cancel (read), horizon counters, the completion + running flags (published LAST) and one TrainingHorizonDisplay per grid slot; every pointer may be NULL]
+// [OVERVIEW]_[the run's display + control channel — run status, cancel (read), horizon counters, the completion flag (published LAST) and one TrainingHorizonDisplay per grid slot; every pointer may be NULL]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -256,8 +256,7 @@ struct TrainingRunSink {
     volatile int*       total;           // N
     volatile int*       current;         // the horizon in progress (ticks)
     volatile int*       done;            // horizons finished
-    volatile int*       complete;        // published (release) LAST
-    volatile int*       running;         // cleared (release) LAST
+    volatile int*       complete;        // published (release) LAST — the job's end is the funnel's (D-506 / D-507 call 6)
     TrainingHorizonDisplay horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 //======================================================================
@@ -546,7 +545,7 @@ struct TrainingFvRequest {
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[a Run Full Validation job's display + control channel — status text, progress, cancel (read), and the completion + running flags published LAST; every pointer may be NULL]
+// [OVERVIEW]_[a Run Full Validation job's display + control channel — status text, progress, cancel (read), and the completion flag published LAST; every pointer may be NULL]
 //======================================================================
 // [CODE]
 //======================================================================
@@ -555,7 +554,6 @@ struct TrainingFvSink {
     volatile int* progress;              // 0..100, written by the validation pass
     const SuiteCancelWord* cancel;       // READ
     volatile int* complete;              // published (release) LAST — the panel shows the result once it reads 1 (acquire)
-    volatile int* running;               // cleared (release) LAST
 };
 //======================================================================
 // [END_CODE]
@@ -598,12 +596,8 @@ inline void TrainingSink_Set(volatile int* p, int v) {
 inline void TrainingSink_PublishComplete(volatile int* flag) {
     if (flag) __atomic_store_n(flag, 1, __ATOMIC_RELEASE);
 }
-inline void TrainingSink_Finish(volatile int* complete, volatile int* running) {
-    TrainingSink_PublishComplete(complete);
-    if (running) __atomic_store_n(running, 0, __ATOMIC_RELEASE);
-}
 inline void TrainingSink_FinishRun(const TrainingRunSink& sink) {
-    TrainingSink_Finish(sink.complete, sink.running);
+    TrainingSink_PublishComplete(sink.complete);
 }
 inline int TrainingSink_Load(const volatile int* flag) {
     return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
@@ -1866,7 +1860,7 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
         if (out) memset((void *)out, 0, sizeof(*out));   // completion is published: no stale result behind it
         TrainingSink_Status(sink.status,
                             "Full validation: no dataset or result storage in the request — refused.");
-        TrainingSink_Finish(sink.complete, sink.running);
+        TrainingSink_PublishComplete(sink.complete);
         return;
     }
     const BacktestResults* data = req.data;
@@ -1984,7 +1978,7 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
                             "Held-out did not complete (cancel or shape error?)");
     }
     // F6 — the result is complete: publish it LAST (release); the panel reads with acquire.
-    TrainingSink_Finish(sink.complete, sink.running);
+    TrainingSink_PublishComplete(sink.complete);
 }
 //======================================================================
 // [END_CODE]

@@ -3799,8 +3799,7 @@ static_assert(alignof(TrainingPanelState) == 64, "TrainingPanelState's alignment
 // (escape hatch preserved — an operator experimenting with a deliberately
 // short purge can still ask for one). Falls back to the legacy 1000 only
 // when auto is requested and NO horizon list exists to derive from.
-static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
-    if (!st) return LABEL_DEFAULT_FORWARD_TICKS;
+static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {   // st: the panel's own — never NULL
     if (st->wf_horizon_ticks > 0) return st->wf_horizon_ticks;  // explicit override
     int mx = 0;
     for (int i = 0; i < st->ui_horizon_count
@@ -3834,9 +3833,9 @@ static inline int Training_ResolvePurgeHorizon(const TrainingPanelState *st) {
 //======================================================================
 static inline int Training_ResolvePurgeForLabels(const TrainingPanelState *st, const BacktestRunConfig *rec,
                                                  const BacktestResults *data) {
-    const bool explicit_override = st && st->wf_horizon_ticks > 0;
+    const bool explicit_override = st->wf_horizon_ticks > 0;   // st: the panel's own — never NULL (every caller passes its own)
     const int  labels_horizon    = BacktestRunConfig_LabelsHorizon(rec, data ? data->sample_count : 0);
-    if (st && !explicit_override && st->ui_horizon_count == 0 && labels_horizon > 0) return labels_horizon;
+    if (!explicit_override && st->ui_horizon_count == 0 && labels_horizon > 0) return labels_horizon;
     return Label_PurgeCovering(Training_ResolvePurgeHorizon(st), explicit_override, labels_horizon);
 }
 //======================================================================
@@ -3861,7 +3860,7 @@ static inline BacktestLabelRequest TrainingPanel_CollectLabels(const TrainingPan
     BacktestLabelRequest l{};
     l.label_type        = Label_ResolveKindForHorizon(state->ui_label_kind_per_horizon,
                                                       state->ui_label_kind_per_horizon_count, state->label_type, 0);
-    l.forward_ticks     = state->ui_horizon_count >= 1 ? state->ui_horizon_list[0] : 0;   // the CSV's first (a start's gate requires one); 0 = the label pass's default
+    l.forward_ticks     = state->ui_horizon_list[0];   // the CSV's first (a start's gate requires one); none typed = 0 (the parse zero-fills) = the label pass's default
     l.tp_pct            = state->ui_tp_per_horizon[0];   // position 0 — the field's own value (seeded if it held none)
     l.sl_pct            = state->ui_sl_per_horizon[0];
     l.roundtrip_fee_pct = state->label_roundtrip_fee_pct;
@@ -4268,7 +4267,6 @@ static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
     sink.progress   = &state->fv_job.progress;
     sink.cancel     = &state->fv_job.cancel;
     sink.complete   = &state->fv_job.complete;
-    sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     TrainingWorkers_RunFullValidation(args->req, sink, &state->fv_results);
     free(args);
     return NULL;
@@ -4532,7 +4530,6 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
     sink.done       = &state->mh_job.progress;
     sink.complete   = nullptr;   // no reader wants a whole-run "done": the table renders on total, each row on its own
                                  // mh_horizon_complete[h] — the D-504 trace found mh_complete write-only (D-505: NULL)
-    sink.running    = nullptr;   // the funnel's trampoline ends the job once the run returns (D-506)
     for (int h = 0; h < TrainingPanelState::PANEL_HORIZON_MAX; ++h) {
         sink.horizon[h].status     = &state->mh_horizon_status[h];
         sink.horizon[h].progress   = &state->mh_horizon_progress[h];
