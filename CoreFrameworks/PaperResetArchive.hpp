@@ -9,8 +9,7 @@
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[paper-reset session archiving — timestamped dir + snapshot + trades copy + summary.json before the OMS wipe]
 // [CONTAINS]
-//   - [FUNCTION]_[PaperResetArchive_FormatDirname]
-//   - [FUNCTION]_[PaperResetArchive_CreateDirectories]
+//   - [FUNCTION]_[PaperResetArchive_FormatDirname]   (PaperResetArchive_FormatTimestamp rides)
 //   - [FUNCTION]_[Summary_WriteJson]
 //======================================================================================================
 // Operator-initiated paper-reset captures the prior session's state into a
@@ -34,7 +33,7 @@
 //
 //   1. Capture session_end_us = now_us()
 //   2. PaperResetArchive_FormatDirname(start_us, end_us, dirname_buf, sizeof(dirname_buf))
-//   3. PaperResetArchive_CreateDirectories(dirname_buf)
+//   3. FoxDir_CreateParents(dirname_buf)   (MemHeaders/DirCreate.hpp — the ONE mkdir -p walker)
 //   4. ShardedSnapshot_Save(&state, "<dirname>/snapshot.dat", partial_on)
 //   5. rename(logging/SYMBOL_order_history.csv, <dirname>/trades.csv)
 //   6. Summary_WriteJson("<dirname>/summary.json", state, cfg, num_nodes, session_end_us)
@@ -72,7 +71,6 @@
 #include "../MemHeaders/NodeCtxSummaryFieldRegistry.hpp"  // Summary_EmitPerCoreEntry + Summary_EmitPerStrategy + json_emit_*
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"         // MASK_OMS_STATE_KILL_SWITCH_TRIPPED
 #include "../MemHeaders/BitmapMacros.hpp"                 // BITMAP_IS_SET
-#include "../MemHeaders/DirCreate.hpp"                    // FoxDir_CreateParents (the mkdir -p SSoT; extracted from here at E.1.2.D D-a)
 
 // Forward declarations — PaperResetArchive.hpp is included by EngineSharded.hpp
 // AFTER EventLoopState<F> + ControllerConfig<F> + NodeContext<F> are defined.
@@ -93,9 +91,15 @@ namespace tt {
 
 template <unsigned F> struct EventLoopState;
 
-//------------------------------------------------------------------------------------------------------
-// [SECTION]_[timestamp + dirname formatters]
-//------------------------------------------------------------------------------------------------------
+//======================================================================
+// [FUNCTION]_[PaperResetArchive_FormatDirname]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PERSISTENCE] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the archive dir's path — "data/paper_resets/{start}_to_{end}.paper", each end a filesystem-friendly local timestamp (PaperResetArchive_FormatTimestamp rides); the dir is made by FoxDir_CreateParents]
+//======================================================================
+// [CODE]
+//======================================================================
 // PaperResetArchive_FormatTimestamp — wall-clock us → ISO 8601-flavored string.
 // Format: "YYYY-MM-DD-HHMMSS" (filesystem-friendly; no colons; no T separator).
 // Uses localtime_r for thread safety. out_size should be >= 20.
@@ -118,23 +122,11 @@ inline void PaperResetArchive_FormatDirname(uint64_t start_us, uint64_t end_us,
     PaperResetArchive_FormatTimestamp(end_us,   end_iso,   sizeof(end_iso));
     std::snprintf(out, out_size, "data/paper_resets/%s_to_%s.paper", start_iso, end_iso);
 }
-
-//------------------------------------------------------------------------------------------------------
-// [SECTION]_[directory creation — mkdir -p semantics in C]
-//------------------------------------------------------------------------------------------------------
-// Creates each path component if it doesn't exist. Returns 1 on success
-// (or "exists already"), 0 on hard failure (permission denied, no parent
-// dir, etc.).
-//
-// Path must be <= 512 chars. Recurses by null-terminating at each '/' and
-// calling mkdir() incrementally.
-inline int PaperResetArchive_CreateDirectories(const char* path) {
-    // E.1.2.D D-a — body extracted VERBATIM to MemHeaders/DirCreate.hpp
-    // (FoxDir_CreateParents) so the model-state savers share the ONE
-    // mkdir -p walker; this name survives as the forwarder for its
-    // existing callers. Log prefix moved "[archive]" -> "[mkdir]".
-    return FoxDir_CreateParents(path);
-}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[PaperResetArchive_FormatDirname]
+//======================================================================
 
 //======================================================================
 // [FUNCTION]_[Summary_WriteJson]

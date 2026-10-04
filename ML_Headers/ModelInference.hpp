@@ -10,7 +10,7 @@
 // [OVERVIEW]_[XGBoost/LightGBM single-row inference + the H9 stamp emit/parse heart — ModelHandle lifecycle, ensemble predict paths, and the verify_model_stamp / stamp_write_for_model wire pair]
 // [CONTAINS]
 //   - [STRUCT]_[ModelHandle]              (bit-packed has_flags + X-macro stamp-derived fields; 5 cluster bands)
-//   - [FUNCTION]_[Model_Init] / [Model_Load] / [Model_Free] / [Model_IsLoaded]   (handle lifecycle)
+//   - [FUNCTION]_[Model_Init] / [Model_Load] / [Model_Free]   (handle lifecycle; Model_IsLoaded rides Model_Free)
 //   - [FUNCTION]_[Model_LoadInferenceBooster]   (USE_XGBOOST — the one booster load both backends share)
 //   - [FUNCTION]_[Model_Predict] (+ _Normalized / _AtClass / _AOT stubs / _Ensemble / _Ensemble_Weighted / _PredictMulti)
 //   - [FUNCTION]_[FeatureLookback_Max]    (+ CountEnabled; over the FEATURE_LOOKBACKS temporal-reach table)

@@ -37,8 +37,9 @@
 // D-a no-regret batch, 2026-08-22) — both /decision-check halves
 // independently prescribed save-side dir provisioning for the four
 // bandit/Thompson state writers, and duplicating the walker would have
-// been the exact parallel-implementation sin. PaperResetArchive keeps
-// its original name as a forwarder. Log prefix generalized
+// been the exact parallel-implementation sin. (Its forwarder,
+// PaperResetArchive_CreateDirectories, retired 2026-10-04 — the callers
+// call this.) Log prefix generalized
 // "[archive]" -> "[mkdir]" (diagnostics only; nothing parses it).
 //
 // Path must be <= 512 chars. Recurses by null-terminating at each '/'

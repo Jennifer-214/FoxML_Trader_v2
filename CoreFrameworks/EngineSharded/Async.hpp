@@ -7,10 +7,9 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [PRODUCER] [OMS_DRAINER] [CONCURRENCY]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the producer fan-out + drainer drain-with-submit hoisted helpers — the two async thread bodies' cores]
+// [OVERVIEW]_[the producer fan-out hoisted helper (the producer thread body's core) + the drainer-cycle bench histogram; the drainer's drain-with-submit moved to EngineCommon_DrainEventsAndSubmit at P4-pre-3c (the backtest needs the same body)]
 // [CONTAINS]
 //   - [FUNCTION]_[EngineSharded_Async_FanOut]
-//   - [FUNCTION]_[EngineSharded_Async_DrainWithSubmit]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -22,8 +21,8 @@
 //   - EngineSharded_Async_FanOut — hoist of producer-thread fan_out lambda. Pushes a tick
 //     into every core's tick ring + replicates ema_price + runs slow-path GUI publish +
 //     cfg hot-reload + paper-reset coordination at cadence.
-//   - EngineSharded_Async_DrainWithSubmit — hoist of drainer-thread drain_with_submit
-//     lambda. Drains each core's TradeEvent ring + builds SubmitCommand + pushes to OMS.
+//   - (MOVED at P4-pre-3c: the drainer's drain_with_submit hoist lives at EngineCommon.hpp as
+//     EngineCommon_DrainEventsAndSubmit — the backtest needs the same body; see the MOVED note below.)
 //
 // **Decision B clarification:** Hoisted helpers use `template<unsigned F>` (NOT
 // `template<F, BENCH>`). All Live/Backtest dispatch is cfg-flag-driven; BENCH gate
@@ -67,7 +66,8 @@
 #include "../ShardedSnapshot.hpp"           // TUI_CopySnapshotSharded
 #include "../ShardedSnapshotPersist.hpp"    // ShardedSnapshot_Save (declared as template; needed BEFORE call at line 428 to satisfy C++17 two-phase lookup; avoids -Wc++20-extensions warning)
 #include "../ShardedTradeLog.hpp"           // ShardedTradeLog_Flush / _Rotate / _FormatPerCoreFilename
-#include "../PaperResetArchive.hpp"         // PaperResetArchive_* + Summary_WriteJson
+#include "../PaperResetArchive.hpp"         // PaperResetArchive_FormatDirname + Summary_WriteJson
+#include "../../MemHeaders/DirCreate.hpp"   // FoxDir_CreateParents — the ONE mkdir -p walker
 #include "../SPSCRing.hpp"                  // SPSCRing + SPSCRing_TryPush / _TryPop
 #include "../Tick.hpp"                      // Tick<F>
 #include "../ParameterSlot.hpp"             // ParameterSlot<Tick<F>> — latest-tick seqlock (PARITY-047)
@@ -152,7 +152,7 @@ inline void EngineSharded_ExecutePaperReset(const ControllerConfig<F>& cfg,
         char dirname[256];
         tt::PaperResetArchive_FormatDirname(prior_start_us, end_us,
                                              dirname, sizeof(dirname));
-        if (tt::PaperResetArchive_CreateDirectories(dirname)) {
+        if (FoxDir_CreateParents(dirname)) {
             // 1) snapshot.dat — full OMS + per-core via existing ShardedSnapshot_Save.
             //    Composer-executed = owner-side (design row 5 — the third emitter aligns
             //    with the P2-d periodic + D-420 shutdown saves).
@@ -196,7 +196,7 @@ inline void EngineSharded_ExecutePaperReset(const ControllerConfig<F>& cfg,
                 char trades_subdir[384];
                 std::snprintf(trades_subdir, sizeof(trades_subdir),
                               "%s/trades", dirname);
-                if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
+                if (FoxDir_CreateParents(trades_subdir)) {
                     for (int c = 0; c < MAX_EXECUTION_NODES; ++c) {
                         if (!state.oms->trade_log->per_node_files[tt::NodeIdx{(int16_t)c}]) continue;
                         char per_src[256], per_dst[512];

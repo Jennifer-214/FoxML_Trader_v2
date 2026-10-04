@@ -65,9 +65,9 @@
 //     drain_post_fill lambda) + EngineSharded_SlowPath_DrainManualCloses
 //     (MERGED hoist of drain_manual_closes LIVE+NO-OP variants per Decision H).
 //   - Async.hpp: g_engine_drainer_cycle_hist inline global +
-//     EngineSharded_Async_FanOut (hoist of producer-thread fan_out lambda) +
-//     EngineSharded_Async_DrainWithSubmit (hoist of drainer-thread
-//     drain_with_submit lambda). File-local-static refs (nodes[], tick_rings[],
+//     EngineSharded_Async_FanOut (hoist of producer-thread fan_out lambda); the
+//     drainer's drain_with_submit hoist moved to EngineCommon_DrainEventsAndSubmit
+//     (EngineCommon.hpp) at P4-pre-3c. File-local-static refs (nodes[], tick_rings[],
 //     g_tick_rec, g_depth_shared, g_shared, g_candle_acc) passed explicitly
 //     because they cannot be referenced from header scope.
 //   - Run.hpp: g_sharded_order_lat inline global + EngineSharded_CalibrateTscGhz
