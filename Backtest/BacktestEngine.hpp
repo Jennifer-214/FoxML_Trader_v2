@@ -82,13 +82,15 @@
 // [CODE]
 //======================================================================
 // loads Binance aggTrades CSV format:
-//   id,price,qty,first_id,last_id,timestamp,is_buyer_maker
+//   id,price,qty,first_id,last_id,timestamp,is_buyer_maker[,is_best_match]
+//   (her daily dumps carry the 8th column and NO header; the timestamp is MILLISECONDS before 2025-01-01 and
+//   microseconds after, stored here RAW — A-REPLAY's F-3 / F-4, homed at INGEST-a: the one reader normalizes)
 // or TickRecorder format:
 //   timestamp_us,price,quantity,is_buyer_maker
 static inline int BacktestData_DetectFormat(const char *header) {
     // TickRecorder format starts with "timestamp_us"
     if (strncmp(header, "timestamp_us", 12) == 0) return 1;
-    // Binance aggTrades has 7 fields starting with numeric ID
+    // Binance aggTrades: 7 or 8 fields starting with a numeric ID
     return 0;
 }
 
@@ -133,13 +135,16 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
             else t->is_buyer_maker = (int)strtol(p, &p, 10);
         }
 
-        // v5.9.5j.2 — bogus-ts filter. TickRecorder occasionally writes
-        // truncated rows (write interrupted mid-CSV: only 6 of 8 fields,
-        // ts column ends up containing a partial '17144' instead of
-        // full ms timestamp '1714348800000'). Sanity bound: any tick
+        // v5.9.5j.2 — bogus-ts filter. A daily dump can hold a truncated
+        // row (the one observed: 2024-04-29.csv, 6 of the format's 8 fields,
+        // ts column a partial '17144' instead of the full ms timestamp
+        // '1714348800000' — a Binance-format row, so not a TickRecorder
+        // write: the recorder writes 4 fields). Sanity bound: any tick
         // with ts < 2017-07-14 (1.5e12 ms) is corrupt — skip.
         // Format-1 (TickRecorder) uses microseconds; bound 1.5e15.
-        // Format-0 (Binance aggTrades) uses milliseconds; bound 1.5e12.
+        // Format-0 (Binance aggTrades) bound 1.5e12 — milliseconds, which
+        // only pre-2025 dumps are (later ones are microseconds and pass it;
+        // the column is stored raw either way — F-3, homed at INGEST-a).
         const int64_t MIN_VALID_TS = (format == 1)
             ? 1500000000000000LL    // 1.5e15 µs = 2017-07-14
             : 1500000000000LL;       // 1.5e12 ms = 2017-07-14

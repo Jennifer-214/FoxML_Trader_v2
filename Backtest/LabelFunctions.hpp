@@ -47,7 +47,8 @@
 struct HistoricalTick {
     double price;
     double qty;
-    int64_t timestamp_us; // Binance aggTrades: microseconds since epoch (NOT milliseconds)
+    int64_t timestamp_us; // every consumer reads MICROSECONDS — but the loader stores a Binance dump's column raw, and
+                          // pre-2025 dumps are MILLISECONDS (A-REPLAY F-3, homed at INGEST-a: the one reader normalizes)
     int is_buyer_maker;
 };
 //======================================================================
