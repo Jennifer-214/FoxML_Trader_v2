@@ -4092,7 +4092,8 @@ struct WalkForwardWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *walkforward_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // Walk-Forward trains on the collected matrix — it runs no backtest
+    (void)lease;   // held (the funnel) for the dataset it reads (D-503); Walk-Forward runs no backtest and calls no core
+                   // entry, so it passes the token nowhere — a headless caller holds the lease at its verb (E.2)
     WalkForwardWorkerArgs *args = (WalkForwardWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
@@ -4178,7 +4179,8 @@ struct HyperparamSweepWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *hp_sweep_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // the HP sweep trains on the collected matrix — it runs no backtest (CS-194)
+    (void)lease;   // held (the funnel) for the dataset it reads (D-503); the HP sweep runs no backtest (CS-194) and calls
+                   // no core entry, so it passes the token nowhere — a headless caller holds the lease at its verb (E.2)
     HyperparamSweepWorkerArgs *args = (HyperparamSweepWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
@@ -4256,7 +4258,6 @@ struct FullValidationWorkerArgs {
 // [CODE]
 //======================================================================
 static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // MP-6 commit (3): the producer core requires it
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     // the job's status line clears HERE, under the lease — a refused click never reaches it, so the last run's
@@ -4267,7 +4268,9 @@ static inline void *fullvalidation_worker_fn(void *arg, uint64_t lease) {
     sink.progress   = &state->fv_job.progress;
     sink.cancel     = &state->fv_job.cancel;
     sink.complete   = &state->fv_job.complete;
-    TrainingWorkers_RunFullValidation(args->req, sink, &state->fv_results);
+    // the funnel gave this worker the lease: a refusal would be its invariant broken — LOUD, never a line no code draws
+    if (TrainingWorkers_RunFullValidation(lease, args->req, sink, &state->fv_results) != TRAINING_CORE_RAN)
+        SuiteLease_ReportLostByHolder("Run Full Validation's worker", lease);
     free(args);
     return NULL;
 }
@@ -4514,7 +4517,6 @@ static inline MultiHorizonWorkerArgs *TrainingPanel_MultiHorizonArgs(TrainingPan
 // [CODE]
 //======================================================================
 static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
-    (void)lease;   // MP-6 commit (3): the producer core requires it
     MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     // the job's display that SuiteJob does not hold resets HERE, under the lease (the core clears the per-horizon
@@ -4543,7 +4545,9 @@ static inline void *train_multi_horizon_worker_fn(void *arg, uint64_t lease) {
         TrainingSink_Status(sink.status, "Multi-horizon: out of memory (run result).");
         TrainingSink_FinishRun(sink);
     } else {
-        TrainingWorkers_RunMultiHorizon(args->req, sink, result);
+        // the funnel gave this worker the lease: a refusal would be its invariant broken — LOUD (SuiteLease's own family)
+        if (TrainingWorkers_RunMultiHorizon(lease, args->req, sink, result) != TRAINING_CORE_RAN)
+            SuiteLease_ReportLostByHolder("Train Multi-Horizon's worker", lease);
         free(result);
     }
     free(args);

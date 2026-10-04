@@ -4,7 +4,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code]
+// [OVERVIEW]_[the ML producer core (E.1.3 MP-1) — the multi-horizon orchestrator, its per-horizon train + validate + record job, and the Run Full Validation job, ImGui-free: a request in, a sink for display, a result out, so the suite's panel and a headless caller run the same code Every entry requires the caller's suite run lease, checked ONCE at its start — without it nothing is written (D-503).]
 // [CONTAINS]
 //   - [STRUCT]_[TrainingStatusLine]
 //   - [FUNCTION]_[TrainingStatusLine_Set]
@@ -25,6 +25,7 @@
 //   - [FUNCTION]_[TrainingWorkers_WallClockUs]
 //   - [FUNCTION]_[TrainingWorkers_HorizonRequest]
 //   - [FUNCTION]_[TrainingWorkers_WriteSummary]
+//   - [ENUM]_[TrainingCoreStatus]
 //   - [FUNCTION]_[TrainingWorkers_RunHorizon]
 //   - [STRUCT]_[TrainingPool]
 //   - [FUNCTION]_[TrainingWorkers_RunPool]   (TrainingWorkers_PoolWorker rides)
@@ -73,7 +74,7 @@
 #include "BacktestEngine.hpp"                  // BacktestResults / BacktestRunConfig / FullValidationResults + the label and validation passes
 #include "../ML_Headers/ModelPathSchema.hpp"   // D-431 nested layout — the path-grammar SSoT
 #include "../MemHeaders/DirCreate.hpp"         // FoxDir_CreateParents (family + horizon chain)
-#include "SuiteLease.hpp"                      // SuiteCancel_Requested — the ONE cancel-word reader (the run review, L2)
+#include "SuiteLease.hpp"                      // the suite run lease every entry checks first (D-503) + SuiteCancel_Requested, the ONE cancel-word reader (L2)
 #include "SuiteStartGates.hpp"                 // StartGate_FirstBadHorizon — the horizons a run may train (M1 / NF-5)
 #include <errno.h>
 #include <pthread.h>
@@ -438,6 +439,7 @@ struct TrainingHorizonJob {
     volatile int*          current;      // the run's current-horizon channel
     volatile int*          done;         // the run's horizons-finished channel
     TrainingHorizonOutcome outcome;      // written by the worker, read by the orchestrator AFTER the join
+    uint64_t               lease;        // the run's lease token — each horizon checks it again (a public entry)
 };
 // BacktestResults + BacktestRunConfig make the job 64-aligned (ControllerConfig's alignas(64) PerNodeCfg),
 // so it comes from TrainingWorkers_AllocZeroed, never malloc / calloc. At namespace scope on purpose: it
@@ -882,11 +884,45 @@ inline void TrainingWorkers_WriteSummary(FILE* sf, const TrainingHorizonRequest&
 //======================================================================
 
 //======================================================================
+// [ENUM]_[TrainingCoreStatus]
+//----------------------------------------------------------------------
+// [TAG]_[[ML] [BACKTEST] [CONCURRENCY]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[a producer-core entry's status (D-503) — its zero REFUSES (no lease: nothing written); RAN says only that the core ran]
+//======================================================================
+// The core requires the suite run lease (D-503 — so E.2's headless verbs take the same lease through the same API
+// Backtest_Run does): every entry — the multi-horizon run, one horizon, Full Validation — checks it FIRST and, without it,
+// writes nothing. A refusal over a RESOURCE the call must own (the lease) is a status — a caller can wait and retry it; a
+// refusal of the INPUT, and the run's outcome (done, cancelled, failed), are the sink's and the result's, never a second
+// copy here. Its zero refuses, as BacktestRunStatus's does — an unset status never reads as a run. Never persisted, never
+// logged as a number: a caller maps it by name.
+//======================================================================
+// [CODE]
+//======================================================================
+enum [[nodiscard]] TrainingCoreStatus : uint8_t {
+    TRAINING_CORE_REFUSED_NO_LEASE = 0,   // the caller's token does not hold the suite run lease — nothing written
+    TRAINING_CORE_RAN              = 1,   // the core ran; its outcome is in the sink and the result
+};
+static_assert(TRAINING_CORE_REFUSED_NO_LEASE == 0, "the zero status refuses — an unset status never reads as a run");
+inline const char* TrainingCoreStatus_Name(uint8_t s) {
+    switch (s) {
+        case TRAINING_CORE_REFUSED_NO_LEASE: return "refused: not the holder of the suite run lease";
+        case TRAINING_CORE_RAN:              return "ran";
+        default:                             return "unknown status";
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_ENUM]_[TrainingCoreStatus]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[TrainingWorkers_RunHorizon]
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST]
+// [OVERVIEW]_[one horizon of a multi-horizon grid — labels, the final model trained + saved, WF + held-out validation (which emits its stamp), then the summary, the data-files list and the expected record; completion published LAST. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; otherwise RAN, the outcome in the caller's slot]
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // v5.11.41 — the per-horizon FV helper, moved here by MP-1 (it was mh_run_one_horizon_fv in the
@@ -899,19 +935,27 @@ inline void TrainingWorkers_WriteSummary(FILE* sf, const TrainingHorizonRequest&
 //======================================================================
 // [CODE]
 //======================================================================
-inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRequest& req,
-                                                         BacktestResults* view,
-                                                         BacktestRunConfig* run_cfg,
-                                                         const TrainingHorizonSink& sink,
-                                                         FullValidationResults* result) {
+inline TrainingCoreStatus TrainingWorkers_RunHorizon(uint64_t lease,
+                                                     const TrainingHorizonRequest& req,
+                                                     BacktestResults* view,
+                                                     BacktestRunConfig* run_cfg,
+                                                     const TrainingHorizonSink& sink,
+                                                     FullValidationResults* result,
+                                                     TrainingHorizonOutcome* outcome_out) {
+    if (!SuiteLease_HeldBy(lease)) {   // FIRST: a horizon writes a model, a stamp and its records — all behind the lease
+        fprintf(stderr, "[mh-train] horizon %d REFUSED: the caller's token %llu does not hold the suite run lease — "
+                        "nothing written\n", req.horizon_ticks, (unsigned long long)lease);
+        return TRAINING_CORE_REFUSED_NO_LEASE;
+    }
     TrainingHorizonOutcome outcome{};
-    if (!view || !run_cfg || !result) {
+    if (!view || !run_cfg || !result || !outcome_out) {
         fprintf(stderr, "[mh-train] horizon %d: missing dataset view, run config or result slot — refused\n",
                 req.horizon_ticks);
         TrainingSink_Status(sink.status,
                             "h=%d FAILED: missing dataset view, run config or result slot", req.horizon_ticks);
         TrainingSink_PublishComplete(sink.complete);
-        return outcome;
+        if (outcome_out) *outcome_out = outcome;
+        return TRAINING_CORE_RAN;
     }
     memset((void *)result, 0, sizeof(*result));   // zero BYTES, as the moved body's own clear does
     // The request, bound once under the names the moved body uses.
@@ -980,7 +1024,8 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
         TrainingSink_Status(sink.status, "h=%d FAILED: the label pass aborted (see the log)", horizon_ticks);
         g_wf_marker_horizon = prev_marker;
         TrainingSink_PublishComplete(sink.complete);   // nothing written on this path
-        return outcome;
+        *outcome_out = outcome;
+        return TRAINING_CORE_RAN;
     }
 
     int n_valid = 0;
@@ -996,7 +1041,8 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
                  horizon_ticks, n_valid);
         g_wf_marker_horizon = prev_marker;
         TrainingSink_PublishComplete(sink.complete);   // nothing written on this path
-        return outcome;
+        *outcome_out = outcome;
+        return TRAINING_CORE_RAN;
     }
     outcome.trained = 1;   // past the label floor (F8: a skipped horizon is not counted as trained)
 
@@ -1378,7 +1424,8 @@ inline TrainingHorizonOutcome TrainingWorkers_RunHorizon(const TrainingHorizonRe
     // F5 — completion goes up LAST, after the model, the stamp, the summary, the data-files list and
     // the expected record are all written (it used to precede the last three).
     TrainingSink_PublishComplete(sink.complete);
-    return outcome;
+    *outcome_out = outcome;
+    return TRAINING_CORE_RAN;
 }
 //======================================================================
 // [END_CODE]
@@ -1466,7 +1513,7 @@ inline int TrainingWorkers_RunPool(TrainingPoolFn fn, void* ctx, int count, int 
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[train a multi-horizon model grid, serial or parallel — one batched label pass, then one TrainingWorkers_RunHorizon per horizon over a private dataset view + run-config copy; fills the caller's result, publishes completion LAST]
+// [OVERVIEW]_[train a multi-horizon model grid, serial or parallel — one batched label pass, then one TrainingWorkers_RunHorizon per horizon over a private dataset view + run-config copy. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; otherwise RAN — fills the caller's result, publishes completion LAST]
 // [REFERENCE]_[PARITY]_[PARITY-21]
 //======================================================================
 // [CODE]
@@ -1480,8 +1527,10 @@ inline void* TrainingWorkers_HorizonThread(void* arg) {
     // whole run) — publish the horizon on entry; the completion count is bumped atomically below
     // because N workers finish out of order and a plain increment from several threads loses counts.
     TrainingSink_Set(job->current, job->req.horizon_ticks);
-    job->outcome = TrainingWorkers_RunHorizon(job->req, &job->view, &job->run_cfg, job->sink,
-                                              job->result);
+    // the run checked the lease at its entry and holds it for the call: a refusal here is the funnel's invariant broken
+    if (TrainingWorkers_RunHorizon(job->lease, job->req, &job->view, &job->run_cfg, job->sink, job->result,
+                                   &job->outcome) != TRAINING_CORE_RAN)
+        SuiteLease_ReportLostByHolder("a multi-horizon run's pooled horizon", job->lease);
     if (job->done) __atomic_add_fetch(job->done, 1, __ATOMIC_RELAXED);   // display-only: RELAXED
     return NULL;
 }
@@ -1514,9 +1563,15 @@ inline void TrainingWorkers_Refuse(const TrainingRunSink& sink, const char* fmt,
     TrainingSink_FinishRun(sink);
 }
 
-inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
-                                            const TrainingRunSink& sink,
-                                            TrainingRunResult* out) {
+inline TrainingCoreStatus TrainingWorkers_RunMultiHorizon(uint64_t lease,
+                                                          const TrainingRunRequest& req,
+                                                          const TrainingRunSink& sink,
+                                                          TrainingRunResult* out) {
+    if (!SuiteLease_HeldBy(lease)) {   // before anything is written: the display, the result, a file (D-503)
+        fprintf(stderr, "[mh-train] REFUSED: the caller's token %llu does not hold the suite run lease — nothing written, "
+                        "no run\n", (unsigned long long)lease);
+        return TRAINING_CORE_REFUSED_NO_LEASE;
+    }
     constexpr int HMAX = ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX;
     // v5.11.41 — a new run clears the per-horizon display FIRST, and the run's total stays 0 until the
     // run is accepted: a refused run then shows its reason and no table, never the previous run's rows
@@ -1530,7 +1585,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     TrainingSink_Set(sink.total, 0);
     if (!out) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: no result storage — refused.");
-        return;
+        return TRAINING_CORE_RAN;
     }
     memset((void *)out, 0, sizeof(*out));   // zero BYTES — what the panel's per-horizon clear did
 #ifdef USE_XGBOOST
@@ -1538,12 +1593,12 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     const char* run_name      = req.run_name;
     if (horizon_count <= 0) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: the request names no horizons — refused.");   // the panel's gate asks first
-        return;
+        return TRAINING_CORE_RAN;
     }
     if (horizon_count > HMAX) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: %d horizons exceeds the grid cap %d — refused.",
                                horizon_count, HMAX);
-        return;
+        return TRAINING_CORE_RAN;
     }
     // Each horizon is its own model directory, named by the model path's grammar: a horizon named twice sends two jobs
     // at one model file, one stamp temp path and one set of records (a stamp could carry one job's label identity over
@@ -1556,17 +1611,17 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
             TrainingWorkers_Refuse(sink, "Multi-horizon: horizon %d (position %d) is not one a run may train — each must "
                                    "be 1..%d and named once (its own model directory); refused.",
                                    req.horizon_ticks[bad], bad + 1, (int)MODEL_HORIZON_TICKS_MAX);
-            return;
+            return TRAINING_CORE_RAN;
         }
     }
     // An empty root would put the model tree at the filesystem root ("/<class>/...").
     if (!req.models_root[0] || !req.run_cfg) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: no models root or run config in the request — refused.");
-        return;
+        return TRAINING_CORE_RAN;
     }
     if (!req.data || req.data->sample_count <= 0) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: Collect Features first.");
-        return;
+        return TRAINING_CORE_RAN;
     }
 
     fprintf(stderr, "[mh-train] starting multi-horizon train: %d horizons, "
@@ -1578,7 +1633,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     BacktestRunConfig *run_cfg = TrainingWorkers_AllocZeroed<BacktestRunConfig>();
     if (!run_cfg) {
         TrainingWorkers_Refuse(sink, "Multi-horizon: out of memory (run config copy).");
-        return;
+        return TRAINING_CORE_RAN;
     }
     *run_cfg = *req.run_cfg;
 
@@ -1701,6 +1756,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
             job->result      = &out->horizon[h];
             job->current     = sink.current;
             job->done        = sink.done;
+            job->lease       = lease;
             jobs[h] = job;
         }
         const int workers = TrainingWorkers_RunPool(TrainingWorkers_PoolJob, jobs, horizon_count, n_parallel);
@@ -1752,9 +1808,10 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
                 TrainingSink_PublishComplete(hs.complete);
                 continue;
             }
-            out->outcome[h] = TrainingWorkers_RunHorizon(
-                TrainingWorkers_HorizonRequest(req, h, mh_batch_ok), &view, run_cfg, hs,
-                &out->horizon[h]);
+            // the run checked the lease at its entry and holds it for the call: a refusal is the funnel's invariant broken
+            if (TrainingWorkers_RunHorizon(lease, TrainingWorkers_HorizonRequest(req, h, mh_batch_ok), &view, run_cfg,
+                                           hs, &out->horizon[h], &out->outcome[h]) != TRAINING_CORE_RAN)
+                SuiteLease_ReportLostByHolder("a multi-horizon run's horizon", lease);
         }
         view.labels = NULL;
         free(own_labels);
@@ -1784,6 +1841,7 @@ inline void TrainingWorkers_RunMultiHorizon(const TrainingRunRequest& req,
     (void)req;
     TrainingWorkers_Refuse(sink, "Multi-horizon: XGBoost not compiled in (build with -DUSE_XGBOOST=ON)");
 #endif
+    return TRAINING_CORE_RAN;
 }
 //======================================================================
 // [END_CODE]
@@ -1843,7 +1901,7 @@ inline void TrainingWorkers_FvRequestIdentity(TrainingFvRequest* r,
 //----------------------------------------------------------------------
 // [TAG]_[[ML] [BACKTEST]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[Run Full Validation — WF on the train+val slice, the held-out evaluation and its gap gate, and the re-stamp of the model at the request's path when the gate passes; fills the caller's result, publishes completion LAST]
+// [OVERVIEW]_[Run Full Validation — WF on the train+val slice, the held-out evaluation and its gap gate, and the re-stamp of the model at the request's path when the gate passes. Requires the caller's suite run lease, checked FIRST (D-503): without it REFUSED_NO_LEASE, nothing written; otherwise RAN — fills the caller's result, publishes completion LAST]
 //======================================================================
 // v5.8.7 — the full-validation job, moved here by MP-1b (it was fullvalidation_worker_fn in the panel
 // file). Behaviour-neutral but for: the role the stamp records comes from the request (F10 — the panel
@@ -1854,14 +1912,19 @@ inline void TrainingWorkers_FvRequestIdentity(TrainingFvRequest* r,
 //======================================================================
 // [CODE]
 //======================================================================
-inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, const TrainingFvSink& sink,
-                                              FullValidationResults* out) {
+inline TrainingCoreStatus TrainingWorkers_RunFullValidation(uint64_t lease, const TrainingFvRequest& req,
+                                                            const TrainingFvSink& sink, FullValidationResults* out) {
+    if (!SuiteLease_HeldBy(lease)) {   // before anything is written — the input refusal below writes the sink (D-503)
+        fprintf(stderr, "[fullvalidation] REFUSED: the caller's token %llu does not hold the suite run lease — nothing "
+                        "written, no run\n", (unsigned long long)lease);
+        return TRAINING_CORE_REFUSED_NO_LEASE;
+    }
     if (!out || !req.data) {
         if (out) memset((void *)out, 0, sizeof(*out));   // completion is published: no stale result behind it
         TrainingSink_Status(sink.status,
                             "Full validation: no dataset or result storage in the request — refused.");
         TrainingSink_PublishComplete(sink.complete);
-        return;
+        return TRAINING_CORE_RAN;
     }
     const BacktestResults* data = req.data;
     // Backtest_RunFullValidation writes progress through a non-null pointer; a NULL cancel word reads as never
@@ -1979,6 +2042,7 @@ inline void TrainingWorkers_RunFullValidation(const TrainingFvRequest& req, cons
     }
     // F6 — the result is complete: publish it LAST (release); the panel reads with acquire.
     TrainingSink_PublishComplete(sink.complete);
+    return TRAINING_CORE_RAN;
 }
 //======================================================================
 // [END_CODE]

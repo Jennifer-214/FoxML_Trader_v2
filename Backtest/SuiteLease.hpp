@@ -32,8 +32,11 @@
 //
 // WHY ONE FUNNEL: a lock taken by hand at each launch site is a convention a new worker can forget. The funnel takes
 // the lease before it spawns, releases it when the spawn fails, and its trampoline releases it however the worker's
-// thread ends (a return, pthread_exit, a cancellation) — every exit path of every worker, by construction. A headless
-// caller (no thread) takes the lease through SuiteLease_TryAcquire / SuiteLease_Release directly.
+// thread ends (a return, pthread_exit, a cancellation) — every exit path of every worker, by construction. Nothing
+// CANCELS a worker today — the spawn discards the thread id — and it must stay so: the training core is not
+// cancellation-safe (a worker cancelled in its pool's join would release the lease while the pool's threads still write
+// into a frame that is gone). A headless caller (no thread) takes the lease through SuiteLease_TryAcquire /
+// SuiteLease_Release directly, and holds it for the whole call: every core entry checks it ONCE, at its start.
 //
 // One suite run at a time follows: while any worker holds the lease, every other start refuses, naming the holder.
 //
@@ -73,6 +76,8 @@ struct alignas(64) SuiteLeaseState {
     const char* volatile holder;         // set by the winning acquirer, cleared by its release — display only
     volatile uint64_t    issued;         // the last token handed out (an atomic add)
     volatile uint64_t    bad_releases;   // a release by a token that does not hold the lease: a bug, counted and printed
+    volatile uint64_t    lost_by_holder; // a run that holds the lease by construction refused for not holding it: the
+                                         // funnel's invariant broke — counted and printed (SuiteLease_ReportLostByHolder)
     volatile uint64_t    acquired_ns;    // the monotonic clock when the holder took it — written by the acquirer, read
                                          // by its release (the same thread, or after the funnel's spawn)
 };
@@ -187,6 +192,14 @@ inline uint64_t SuiteLease_TryAcquire(const char* holder, char* refused = nullpt
 //======================================================================
 // [CODE]
 //======================================================================
+// A run that holds the lease BY CONSTRUCTION — a funnel worker, or the training core's per-horizon re-check under its
+// entry's own check — was refused for not holding it: the funnel's invariant broke. LOUD, as a bad release is: counted
+// and printed, never a status line no code may draw (the (3b) review, F3).
+inline void SuiteLease_ReportLostByHolder(const char* where, uint64_t token) {
+    __atomic_add_fetch(&g_suite_lease.lost_by_holder, 1, __ATOMIC_RELAXED);
+    fprintf(stderr, "[suite-lease] CRITICAL: %s ran on token %llu, which does not hold the lease — the funnel's "
+                    "invariant broke\n", where ? where : "?", (unsigned long long)token);
+}
 inline bool SuiteLease_Release(uint64_t token) {
     if (!SuiteLease_HeldBy(token)) {
         __atomic_add_fetch(&g_suite_lease.bad_releases, 1, __ATOMIC_RELAXED);
