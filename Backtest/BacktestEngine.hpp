@@ -163,6 +163,53 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
 //======================================================================
 
 //======================================================================
+// [FUNCTION]_[BacktestData_MillisecondDump]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[INGEST-0 (D-511 call 7) — does a data file hold MILLISECOND timestamps (a Binance dump from before 2025-01-01)? the majority of its first trades decides; the replay refuses such a corpus until INGEST-a's one reader normalizes it, and that leaf deletes this]
+//======================================================================
+// [CODE]
+//======================================================================
+// Binance's aggTrades dumps carry MILLISECONDS before 2025-01-01 and microseconds after; BacktestData_Load stores the
+// column raw while every consumer of a tick's time reads microseconds (A-REPLAY's F-3 — homed at INGEST-a, where the
+// one reader normalizes). Until then the replay REFUSES a corpus holding such a file, and this decides it — without
+// touching the loader (a second normalizer is what D-492 ruled out). A file's unit is the MAJORITY of the votes in its
+// first INGEST0_LINES lines: a Binance row (id,price,qty,first_id,last_id,TIMESTAMP,…) votes by its sixth field, so one
+// truncated row cannot decide a file; a header's sixth field is a column name and a TickRecorder row has four fields —
+// neither votes, so a TickRecorder file is never refused. A file that changes unit past those lines is INGEST-a's (its
+// per-row check refuses a mixed file). A TIE is not a millisecond dump: truncation only SHORTENS a timestamp, so a
+// damaged millisecond row can never vote microseconds — a tie is a damaged microsecond file, read as it was before.
+// 1 = a millisecond dump; 0 = not, or unreadable (the replay skips those, as before).
+[[nodiscard]] static inline int BacktestData_MillisecondDump(const char *csv_path) {
+    enum { INGEST0_LINES = 9 };
+    static constexpr long long MS_MIN = 1500000000000LL,    MS_END = 100000000000000LL;     // [2017, year 5138) in ms
+    static constexpr long long US_MIN = 1500000000000000LL, US_END = 100000000000000000LL;  // the same span in µs
+    FILE *f = fopen(csv_path, "r");
+    if (!f) return 0;
+    char line[512];
+    int ms = 0, us = 0;
+    for (int n = 0; n < INGEST0_LINES && fgets(line, sizeof(line), f); ++n) {
+        const char *p = line;   // the sixth field
+        for (int c = 0; c < 5 && p; ++c) {
+            p = strchr(p, ',');
+            if (p) ++p;
+        }
+        if (!p) continue;
+        const long long ts = strtoll(p, nullptr, 10);
+        ms += ts >= MS_MIN && ts < MS_END;
+        us += ts >= US_MIN && ts < US_END;
+    }
+    fclose(f);
+    return ms > us ? 1 : 0;
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[BacktestData_MillisecondDump]
+//======================================================================
+
+//======================================================================
 // [FUNCTION]_[BacktestData_ValidateSort]
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
@@ -994,6 +1041,7 @@ enum [[nodiscard]] BacktestRunStatus : uint8_t {
     BACKTEST_RUN_DONE             = 1,   // the run happened (a cancel ends it early; the results cover what ran)
     BACKTEST_RUN_CFG_REFUSED      = 2,   // the capital gate or the partial-exit check refused the cfg — no run
     BACKTEST_RUN_ALLOC_FAILED     = 3,   // the tick buffer could not be allocated — no run
+    BACKTEST_RUN_DATA_REFUSED     = 4,   // a data file holds MILLISECOND timestamps (INGEST-0, D-511) — no run
 };
 
 static inline const char* BacktestRunStatus_Name(uint8_t s) {
@@ -1002,6 +1050,7 @@ static inline const char* BacktestRunStatus_Name(uint8_t s) {
         case BACKTEST_RUN_DONE:             return "done";
         case BACKTEST_RUN_CFG_REFUSED:      return "refused: the cfg failed validation (see the log)";
         case BACKTEST_RUN_ALLOC_FAILED:     return "failed: out of memory for the tick buffer";
+        case BACKTEST_RUN_DATA_REFUSED:     return "refused: millisecond-era data (pre-2025 dumps; see the log)";
         default:                            return "unknown status";
     }
 }
@@ -1727,8 +1776,8 @@ static inline void BacktestResults_DropSamples(BacktestResults *r, const char *w
 // passes its suite run lease token as proof and a token that does not hold
 // the lease is refused BEFORE anything is reset (a refusal never wipes the
 // results another run owns). The status names every outcome — the lease
-// refusal and BacktestSharded_Run's no-run returns (cfg refused, allocation
-// failed) — and every caller handles it by name: the Run Control workers
+// refusal and BacktestSharded_Run's no-run returns (cfg refused, millisecond-era
+// data refused — INGEST-0, allocation failed) — and every caller handles it by name: the Run Control workers
 // skip their post-processing, the sweep never records the cell, the tests
 // take a lease. The label post-pass runs only after a run that happened.
 //
@@ -4201,7 +4250,9 @@ static inline void Backtest_RunSweep(uint64_t lease,
                 // a cell that did not run is never recorded: its empty stats must not compete for best
                 fprintf(stderr, "[optimizer] cell %d not run (%s) — not recorded\n", idx, BacktestRunStatus_Name(st));
                 BacktestResults_Free(&results);
-                if (st == BACKTEST_RUN_REFUSED_NO_LEASE) return;   // the sweep lost its proof — no later cell can run
+                // no later cell can run: the sweep lost its proof, or its corpus — every cell replays the same files —
+                // holds millisecond-era data (INGEST-0). A cfg refusal is per cell (a swept value can cause it): go on
+                if (st == BACKTEST_RUN_REFUSED_NO_LEASE || st == BACKTEST_RUN_DATA_REFUSED) return;
                 continue;
             }
 

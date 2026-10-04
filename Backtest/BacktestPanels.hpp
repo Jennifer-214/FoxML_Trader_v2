@@ -5313,9 +5313,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         SuiteGate_ShowWhy(&mh_collect_gate);
     }
     } // end !single_horizon_mode (Collect Multi-Horizon)
-    // A Run Control run that STARTED but did not happen (its backtest refused the cfg or could not allocate) — a run's
-    // outcome, published by its worker, not a start that failed: it stays here, under the collect buttons that started
-    // it (Run Control shows its own under Run Backtest), not in the launch-failure modal, which only a click opens.
+    // A Run Control run that STARTED but did not happen (its backtest refused the cfg or the data — INGEST-0 — or could
+    // not allocate) — a run's outcome, published by its worker, not a start that failed: it stays here, under the collect
+    // buttons that started it (Run Control shows its own under Run Backtest), not in the launch-failure modal, which only
+    // a click opens.
     if (SuiteJob_Done(&run_control->job) && !RunControl_HasRun(run_control))
         ImGui::TextColored(FoxmlColors::red, "The last Run Control run did not happen — %s",
                            BacktestRunStatus_Name(run_control->last_status));

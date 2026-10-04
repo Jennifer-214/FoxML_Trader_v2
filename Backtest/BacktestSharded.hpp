@@ -109,7 +109,7 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BACKTEST] [DETERMINISM]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; returns DONE, or names why no run happened (the cfg refused, the tick buffer not allocated) — reached only through Backtest_Run, which checks the suite run lease first]
+// [OVERVIEW]_[sharded backtest entry point — loads tick files, drives the per-core architecture through the shared OMS, aggregates P&L/win-loss/drawdown + equity curve; returns DONE, or names why no run happened (the cfg refused, a millisecond-era data file — INGEST-0, the tick buffer not allocated) — reached only through Backtest_Run, which checks the suite run lease first]
 // [REFERENCE]_[DECISION]_[[C-1] [D-122] [D-170] [D-254] [D-255]]
 // [REFERENCE]_[PARITY]_[[PARITY-26] [PARITY-27] [PARITY-28] [PARITY-29] [PARITY-30] [PARITY-31]]
 // [REFERENCE]_[TECH_DEBT]_[TECH_DEBT-119]
@@ -136,7 +136,8 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
     } else {
         cfg = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
     }
-    // ③ D-255 (C-1) — gate the backtest on capital validation. The suite + CLI run through here; pre-D-255
+    // ③ D-255 (C-1) — gate the backtest on capital validation. Every backtest, collect and sweep runs through here (the
+    // engine binary has no backtest mode — FOREACH_ENGINE_CLI_DISPATCH); pre-D-255
     // this path ZEROED the fault flag and ran a malformed cfg silently (a `stop_loss_pct=banana` → SL off).
     // Fail the run (do NOT process-abort — the GUI must stay alive); results stay reset/empty from
     // BacktestResults_Reset above. This is pre-fingerprint, so the golden is not perturbed.
@@ -165,6 +166,29 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
         fprintf(stderr, "[backtest sharded] FATAL: partial-exit cfg "
                         "validation failed. Skipping run.\n");
         return BACKTEST_RUN_CFG_REFUSED;
+    }
+
+    // INGEST-0 (D-511 call 7) — a corpus holding a MILLISECOND-era Binance dump is REFUSED before anything runs: this replay
+    // stores the timestamp column raw, while every time feature, the purge's time span and the time-gated controls read
+    // microseconds, so a run over it would be 1000x off and look fine (A-REPLAY's F-3). The WHOLE corpus is refused, never
+    // a run that skips the file, and every file is read (nine lines each) so the log names how many and where they start
+    // and end. AFTER the reset above, as the cfg refusals are: the worker has already recorded this request as what the
+    // results hold, so they must hold nothing (CS-280 — the dataset owning its corpus — lets every refusal move ahead of the
+    // reset). A refusal, not a normalization: INGEST-a's one reader (TickTape) normalizes and deletes this check.
+    int ms_files = 0, ms_first = -1, ms_last = -1;
+    for (int f = 0; f < run_cfg->num_data_files; f++) {
+        if (BacktestData_MillisecondDump(run_cfg->data_paths[f])) {
+            if (ms_first < 0) ms_first = f;
+            ms_last = f;
+            ++ms_files;
+        }
+    }
+    if (ms_files) {
+        fprintf(stderr, "[backtest sharded] REFUSED: %d of %d data files hold MILLISECOND timestamps (Binance's dumps "
+                        "before 2025-01-01 — the first %s, the last %s); the engine reads microseconds, so every time "
+                        "feature would run 1000x off. Select 2025-01-01 onward until INGEST-a normalizes them.\n",
+                ms_files, run_cfg->num_data_files, run_cfg->data_paths[ms_first], run_cfg->data_paths[ms_last]);
+        return BACKTEST_RUN_DATA_REFUSED;
     }
 
     // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
