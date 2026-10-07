@@ -74,9 +74,11 @@ int main(int argc, char *argv[]) {
     BinanceConfig bcfg       = BinanceConfig_Load(cfg_path);
     ControllerConfig<FP> ccfg = ControllerConfig_Load<FP>(cfg_path);
 
-    // create the logging directory — the engine log and the runtime logs go here. NOT a
-    // clean-start switch: the restart snapshot (data/) and the learned model state live
-    // outside it, so clearing logging/ does not reset the engine
+    // create the logging directory — the engine log, the runtime logs AND the paper OMS ledger
+    // go here (order_events.bin, replayed at every boot into the portfolio, the balance and
+    // realized P&L). So clearing logging/ is NOT a clean start: it wipes the paper ledger while
+    // the restart snapshot (data/) and the learned model state, which live outside it, survive
+    // — a half reset
     mkdir("logging", 0755); // EEXIST (or any error) is ignored; the freopen below reports a failure
 
     // auto-redirect stderr to the log file — must happen BEFORE sharded dispatch, so

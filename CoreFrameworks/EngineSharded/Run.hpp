@@ -586,7 +586,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     "[sharded]        To override: set "
                     "acknowledge_hardcoded_strategy_in_live=1 in %s.\n",
                     hardcoded_count, hardcoded_list, cfg.source_cfg_path);
-                tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
+                tt::Health_Log(tt::HEALTH_CRITICAL, "engine", -1,   // a refusal to boot is operator-blocking (I-1 F-12)
                     "boot_abort reason=hardcoded_strategy_in_live nodes=%s",
                     hardcoded_list);
                 return;  // refuse to boot
@@ -598,7 +598,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 "Hardcoded is fine for backtest comparisons.\n",
                 hardcoded_count, hardcoded_list);
             if (cfg.health_log_path[0]) {
-                tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
+                tt::Health_Log(tt::HEALTH_WARN, "engine", -1,   // a WARN line's record is a warn record (I-1 F-12)
                     "boot_warn hardcoded_strategy_count=%d nodes=%s "
                     "live=%d acknowledged=%d",
                     hardcoded_count, hardcoded_list,
@@ -609,12 +609,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // Try to open the real Binance stream. If it fails — or if the cfg
     // explicitly forces synthetic mode — fall back to the synthetic tick
-    // generator so the latency testbed still runs.
+    // generator so the latency testbed still runs. Either way the fallback
+    // says so LOUDLY below (CS-282) — it used to be one unmarked line.
     static BinanceStream bs;  // static so the producer thread can reach it
+    const bool forced = cfg.sharded_force_synthetic != 0;  // read ONCE — the warning words itself from this, never a second read
     bool use_synthetic;
-    if (cfg.sharded_force_synthetic) {
+    if (forced) {
         use_synthetic = true;  // explicit cfg override, don't even try Binance
     } else {
+        // the connect has no timeout yet (SYN bounds it): a hung TLS handshake would block the
+        // boot here with no line at all, so name what the boot is waiting on first (I-1 F-5)
+        fprintf(stderr, "[sharded] connecting to the market data stream (%s) ...\n", bcfg.symbol);
         use_synthetic = !BinanceStream_Init(&bs, &bcfg);
     }
 
@@ -640,7 +645,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         return;
     }
     if (use_synthetic) {
-        fprintf(stderr, "[sharded] Binance stream not available — using SYNTHETIC ticks\n");
+        EngineSharded_SyntheticFeedWarn(stderr, forced);   // the WARN line + ONE health.jsonl WARN record (CS-282)
     } else {
         fprintf(stderr, "[sharded] Binance stream connected — using REAL market ticks\n");
         fprintf(stderr, "[sharded] symbol: %s\n", bcfg.symbol);
@@ -898,9 +903,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
 
     // Phase 8a (post-coding c7) — TickRecorder for raw market tick CSV audit.
-    // Same pattern as legacy path. Off by default (record_ticks=0).
+    // Same pattern as legacy path. Off by default (record_ticks=0). Never on a
+    // synthetic feed (CS-282, TECH_DEBT-295 ⏩): its ticks are fabricated, and
+    // their seq-derived timestamps filed them in the tape's 1970-01-01 day.
     static TickRecorder g_tick_rec;
-    TickRecorder_Init(&g_tick_rec, bcfg.symbol, cfg.record_ticks, cfg.record_max_days);
+    TickRecorder_Init(&g_tick_rec, bcfg.symbol, use_synthetic ? 0 : cfg.record_ticks, cfg.record_max_days);
+    if (use_synthetic && cfg.record_ticks) {
+        fprintf(stderr, "[tick-recorder] OFF for this run: the feed is SYNTHETIC (record_ticks=%d not honored)\n",
+                cfg.record_ticks);
+    }
 
     // Phase 8a (post-coding c6) — depth feed + DepthRecorder.
     // Same setup as main.cpp's legacy path, runs only when depth_enabled=1.
@@ -1450,6 +1461,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // BG threshold and TP/SL bands). Used when BinanceStream_Init
             // failed (e.g. running offline / no network).
             while (!g_engine_sharded_shutdown) {
+                // once per sawtooth period (~60 s at the throttle below) — the boot WARN scrolls away;
+                // the first (seq 0) prints as the producer starts, after the readiness walk (CS-282)
+                if (seq % 200 == 0) EngineSharded_SyntheticFeedReminder(stderr, seq);
                 double phase = (double)(seq % 200);
                 double price = 60050.0 + (phase < 100.0 ? phase : (200.0 - phase));
                 // small random volume variation for realistic candle rendering
