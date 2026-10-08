@@ -88,7 +88,7 @@
 struct CandleAccumulator;
 #endif
 
-#include "Boot.hpp"   // g_engine_sharded_shutdown — polled inside fan_out body
+#include "Boot.hpp"   // g_engine_sharded_shutdown — polled inside fan_out body; EngineSharded_SyntheticPaperResetRefused (D-518)
 
 // parent_index: CoreFrameworks/EngineSharded.hpp
 
@@ -299,7 +299,7 @@ inline bool EngineSharded_Async_FanOut(
     int slow_path_interval,
     double tsc_ghz,
     FPN_Binary<F> ema_alpha,
-    bool live_trading,
+    bool paper_persist_off,   // D-518 call 4: live || synthetic, resolved at boot — no paper-snapshot save request, no reset archive
     int topo_producer_cpu,
     int topo_drainer_cpu,
     long topo_nproc,
@@ -634,13 +634,14 @@ inline bool EngineSharded_Async_FanOut(
         // BEFORE RebuildAllParameters so Regime_ComputeSignals reads
         // the freshly-updated history.
         // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
-        // cycles, paper mode only. With slow_path_interval=8 ticks and
+        // cycles, paper mode only — never a synthetic session (D-518 call 4: the boot passes live || synthetic in
+        // this argument, its one reader, so the ephemeral off-mode adds no instruction here). With slow_path_interval=8 ticks and
         // ~10 ticks/sec that's roughly every 13 minutes — frequent
         // enough to bound state-loss-on-crash, infrequent enough to
         // not spam the disk. Atomic rename means a crash mid-save
         // leaves the previous good file intact.
         static int save_counter = 0;
-        if (!live_trading && (++save_counter >= 1024)) {
+        if (!paper_persist_off && (++save_counter >= 1024)) {
             save_counter = 0;
             // E.1.3 P2-d — owner-side save: the producer only REQUESTS; the composer executes
             // on the thread that owns every persisted field (persist-dod-1 closes at this site).
@@ -810,9 +811,16 @@ inline bool EngineSharded_Async_FanOut(
         // P4-pre-4 F-8: the flag is consumed ATOMICALLY, and only when the live-capital guard passes (a live
         // engine leaves it set — the pre-existing interlock semantics, unchanged).
         if (shared_ptr && !ControllerConfig_IsLiveCapital(cfg) && TUI_CONSUME_FLAG(shared_ptr->paper_reset_requested)) { // NEW-1 — paper-reset interlock routes the single predicate
-            paper_reset_in_progress.store(true, std::memory_order_release);
-            std::this_thread::yield();   // let slow-paths observe + park before ticks resume
-            state.agg.reset_request.store(1, std::memory_order_release);
+            if (paper_persist_off) {
+                // a synthetic session (live never reaches this branch): REFUSED, said (D-518 call 4) — the reset's archive
+                // would write the fabricated session into data/paper_resets/. Consumed, so the flag does not stay set;
+                // nothing parks (only the composer's reset clears the park flag), nothing resets, the GUI's seq is untouched
+                EngineSharded_SyntheticPaperResetRefused(stderr);
+            } else {
+                paper_reset_in_progress.store(true, std::memory_order_release);
+                std::this_thread::yield();   // let slow-paths observe + park before ticks resume
+                state.agg.reset_request.store(1, std::memory_order_release);
+            }
         }
         // P3-c: completion copy-through — the composer bumps agg.reset_seq; the producer
         // (the GUI's writer) mirrors it so retained-history panels clear on completion.
@@ -843,7 +851,8 @@ inline bool EngineSharded_Async_FanOut(
 //     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
 //     topo_slow_cpu, topo_poll_interval
 //   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,
-//     live_trading, topo_producer_cpu, topo_drainer_cpu, topo_nproc
+//     paper_persist_off (live_trading's slot until D-518 call 4 — its one reader is the save gate),
+//     topo_producer_cpu, topo_drainer_cpu, topo_nproc
 //   - file-local-static args (6 — NOT captures; passed because they're function-local
 //     statics in EngineSharded_Run and CANNOT be referenced from header scope):
 //     tick_rings, cores, tick_rec, depth_shared, shared_ptr (GUI), candle_acc_ptr (GUI)

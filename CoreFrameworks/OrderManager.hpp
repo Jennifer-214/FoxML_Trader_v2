@@ -1042,7 +1042,9 @@ inline void noop_fill_emit(OrderManagerState<F>*, Order<F>*, Money, Money, Money
 
 // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 real fn definitions.
 // Wrap the previous `if (oms->trade_log) { ... }` / `if (oms->calibration_log_file) { ... }` bodies.
-// Set at boot site (e.g., ShardedTradeLog_Init, calibration_log_open) when respective subsystem enables.
+// Set at the boot site: the calibration sink only when its file opens (OrderManager_OpenCalibrationLog); the
+// trade-log sinks unconditionally (Run.hpp) — a log that is not open drops the row at ShardedTradeLog_Record*'s
+// null-file guard (a failed open; a synthetic session, D-518).
 // P3-b flip (D-444 / amendment I): these sink bodies now PRE-BUILD the row as an EmitRecord
 // pushed in LOCKSTEP right after the leaf's FillEvent (same node ring index, same call
 // sequence) — the COMPOSER emits the actual CSV row with the post-apply balance (the leaf
@@ -1498,6 +1500,9 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //======================================================================
 // [CODE]
 //======================================================================
+// The OMS ledger's ONE path literal (D-516) — the engine names it at its boot; PATHS moves it into the path header.
+inline constexpr const char* OMS_EVENT_LOG_DEFAULT_PATH = "logging/order_events.bin";
+
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
@@ -1505,7 +1510,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
                               int partial_exit_enabled,
                               Money starting_balance,
                               int event_log_mode = 0,
-                              const char* event_log_path = "logging/order_events.bin") {
+                              const char* event_log_path = nullptr) {   // no disk unless the caller names one
     OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
                           starting_balance, event_log_mode, event_log_path);
 }
@@ -1554,6 +1559,9 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 // fill+drain pipeline parity since v4.7.15) from the on-disk persistence
 // (live engine only — restart-recovery via replay). Backtest passes nullptr
 // or "" to use in-memory-only mode=1: no disk load, no append-on-write.
+// The default is nullptr since D-518 (no disk unless the caller names one — the engine
+// passes OMS_EVENT_LOG_DEFAULT_PATH, "" in an ephemeral synthetic session); it was the
+// ledger's literal, which a mode-1 caller that forgot the argument would have replayed.
 // Pre-v5.9.5e the path was hardcoded "logging/order_events.bin" and
 // backtest_mode=1 silently inherited live OMS state across runs (stale
 // balance, polluted next_event_id), breaking backtest hermeticity. The
@@ -2115,7 +2123,8 @@ inline void handle_buy_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_p
     }
     oms->last_opened_mask |= (uint16_t)(1u << (int)o->portfolio_slot);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
-    // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot when trade_log Init succeeds.
+    // Default = noop_fill_emit (no-op); set to real_on_entry_fill_emit at boot unconditionally — a log that is not
+    // open drops the row at ShardedTradeLog_RecordEntry's null-file guard (D-518).
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md.
     oms->on_entry_fill_emit(oms, o, fill_price, fill_qty, entry_fee, Money_Zero());
 }
@@ -2270,7 +2279,8 @@ inline void handle_sell_fill(OrderManagerState<F>* oms, Order<F>* o, Money fill_
     }
 
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer dispatch (branchless).
-    // Default = noop_fill_emit; set to real_on_exit_fill_emit at boot when trade_log Init succeeds.
+    // Default = noop_fill_emit; set to real_on_exit_fill_emit at boot unconditionally — a log that is not open drops
+    // the row at ShardedTradeLog_RecordExit's null-file guard (D-518).
     oms->on_exit_fill_emit(oms, o, fill_price, net, total_fee, q_leg);   // per LEG (venue-truth: one CSV row per execution)
 }
 //======================================================================

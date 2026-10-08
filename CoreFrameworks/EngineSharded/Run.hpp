@@ -29,8 +29,8 @@
 //   - EngineSharded_SmartSlowPathPins — slow-path CPU pin assignment avoiding SMT
 //     siblings of producer/hot/drainer threads.
 //   - EngineSharded_DumpLatency<F> — per-core latency table dump (used at shutdown).
-//   - EngineSharded_Run<F, BENCH> — main orchestrator template. The actual sharded
-//     engine entry point that main.cpp dispatches to when engine_mode == ENGINE_MODE_SHARDED.
+//   - EngineSharded_Run<F, BENCH> — main orchestrator template. The engine entry point main.cpp
+//     dispatches to — the only engine path (`engine_mode` is retired since .E.1.1; no code reads it).
 //     Holds ~30 function-scope `static` objects (BinanceStream / BinanceAdapterState /
 //     InitArena / BinanceUserData / NotifyState / TickRecorder / DepthRecorder /
 //     DepthSharedState / ReconciliationLoop / tick_rings[] / nodes[] / TUISharedState /
@@ -423,8 +423,8 @@ static inline void EngineSharded_DumpLatency(const tt::NodeArray<ExecutionCore<F
 //======================================================================
 // [CODE]
 //======================================================================
-// The sharded engine main entry point. Called from main.cpp when
-// engine_mode == ENGINE_MODE_SHARDED.
+// The sharded engine main entry point. Called from main.cpp — the only engine
+// path (`engine_mode` is retired since .E.1.1; no code reads it).
 //
 // Behavior:
 //   1. Calibrate TSC for ns conversion
@@ -623,6 +623,25 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         use_synthetic = !BinanceStream_Init(&bs, &bcfg);
     }
 
+    // Live NEVER runs on synthetic ticks (D-518 call 3): real orders priced off a fabricated sawtooth. Refused here,
+    // before any live init (secrets, the adapter and the OMS's live flag are all set below, and only at boot; the
+    // producer picks its loop once), so `use_synthetic` implies paper for every sink keyed on it. SYN generalizes it.
+    const bool live_trading = ControllerConfig_IsLiveCapital(cfg); // NEW-1 — single capital-authority predicate (was cfg.use_real_money; RBP Class 47)
+    if (use_synthetic && live_trading) {
+        EngineSharded_SyntheticLiveRefuse(stderr, forced);   // the FATAL line + ONE health.jsonl CRITICAL record
+        std::signal(SIGINT, prev_int);
+        std::signal(SIGTERM, prev_term);
+        return;
+    }
+    // The EPHEMERAL synthetic session (D-514 call 2 / D-516 / D-518): each durable sink below takes its EXISTING
+    // off-mode, decided here once from `use_synthetic` — nothing new runs per tick. Two values carry it past boot:
+    // the paper snapshot's persistence (restore / periodic save / final save / the reset's archive) is off for live
+    // (exchange truth) and for a synthetic session — the producer reads it through the fan-out's existing argument,
+    // whose one reader is the save gate — and the learned state binds nothing in a synthetic session (FRESH_ONLY,
+    // the backtest's mode), at boot and at hot-swap. SYN deletes `use_synthetic`, red-building every reader.
+    const bool paper_persist_off = live_trading || use_synthetic;
+    const EzooLearnedState learned_state = use_synthetic ? EzooLearnedState::FRESH_ONLY : EzooLearnedState::BIND;
+
     fprintf(stderr, "\n");
     fprintf(stderr, "================================================================\n");
     fprintf(stderr, "[sharded] STARTING in per-node sharded mode\n");
@@ -664,8 +683,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // thread-safe. The adapter owns one BinanceOrderAPI instance per
     // worker thread (per-thread, not shared). See BinanceAdapter.hpp.
     static BinanceAdapterState g_sharded_binance_adapter;
-    bool live_trading = ControllerConfig_IsLiveCapital(cfg); // NEW-1 — single capital-authority predicate (was cfg.use_real_money; RBP Class 47)
-    if (live_trading) {
+    if (live_trading) {   // computed at the feed decision above (the live-on-synthetic refusal reads it first)
         char api_key[128] = {}, api_secret[128] = {};
         if (!LoadSecrets(CFG_PATH_SECRETS_CFG, api_key, api_secret)) {
             fprintf(stderr, "[sharded] ERROR: trading_mode=live but secrets.cfg missing or incomplete\n");
@@ -761,14 +779,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     int partial_exit_enabled =
         BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED. Per-core fee_rate flows via Order pre_resolve.
+    // Ephemeral (D-516): a synthetic session's OMS ledger lives in memory — an empty path takes OMS_INIT_AUTOPOPULATE
+    // Layer 4's in-memory arm (the backtest's): no replay into the balance / P&L / kill peak, no append.
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
                       partial_exit_enabled,
                       live_starting_balance,
-                      (int)cfg.oms_event_log_mode);
+                      (int)cfg.oms_event_log_mode,
+                      use_synthetic ? "" : OMS_EVENT_LOG_DEFAULT_PATH);
     // v5.13.0.B — open calibration log if cfg.calibration_log_path set.
     // No-op when path is empty (default). Failure is non-fatal (logs to
-    // stderr; calibration logging disabled this session).
-    OrderManager_OpenCalibrationLog(&oms, cfg.calibration_log_path);
+    // stderr; calibration logging disabled this session). Ephemeral: never in a synthetic session.
+    OrderManager_OpenCalibrationLog(&oms, use_synthetic ? "" : cfg.calibration_log_path);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — Class 27 closure: OMS no longer holds scalar fee_rate /
     // fee_rate_maker / fee_rate_taker / slippage_pct fields. Order pre-resolves these
     // per-core via Order_BindPreResolved at submit time. See:
@@ -799,11 +820,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static ShardedTradeLog g_sharded_trade_log;
     // s5-1b: partials mode threaded in so the log derives TRUE node + leg from
     // the slot-keyed event.node_id (BITMAP_SLOT_NODE) for truthful attribution.
-    ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol, partial_exit_enabled);
+    // Ephemeral (D-518 call 1): never opened in a synthetic session — the existing "logging disabled" state, the one
+    // a failed open leaves: ShardedTradeLog_Record* and _Rotate return on a null file, so no fill changes.
+    if (!use_synthetic) ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol, partial_exit_enabled);
     oms.trade_log = &g_sharded_trade_log;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer wire-to-real.
     // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Default = noop;
-    // set-to-real when trade_log enables → handle_buy_fill / handle_sell_fill dispatch to log emit.
+    // set to real here UNCONDITIONALLY (the lockstep EmitRecord path — D-444 amendment I): a log that is not open
+    // (a failed open; a synthetic session, D-518) drops the row at ShardedTradeLog_Record*'s null-file guard.
     oms.on_entry_fill_emit = &tt::real_on_entry_fill_emit<F>;
     oms.on_exit_fill_emit  = &tt::real_on_exit_fill_emit<F>;
 
@@ -1046,7 +1070,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         EngineCommon_BootPerCore(cfg, i, state, tick_rings[tt::NodeIdx{(int16_t)i}], nodes[tt::NodeIdx{(int16_t)i}],
                                   zoo_ptr, ezoo_ptr,
                                   Money{ money_from_double_payload(node_balance) },
-                                  EzooLearnedState::BIND);   // D-483 C — the learned state binds where the one rule says (E.1.5 B re-homes it)
+                                  learned_state);   // D-483 C — BIND where the one rule says (E.1.5 B re-homes it); FRESH_ONLY in a synthetic session (D-516)
 
         // Post-helper LIVE-only wires (M5 persistence + threading observability;
         // Decision B + Decision G — STAY in caller post-helper return).
@@ -1080,13 +1104,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Ensure data/ exists (mkdir is idempotent — silent if it does)
         mkdir("data", 0755);
         if (!live_trading) {
-            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed
-            // oms_state_flags (S3a); set at OrderManager_Init from cfg; drainer-path
-            // single source of truth (S4).
-            int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
-                                                  BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED),
-                                                  &cfg);  // v5.5.5
-            (void)loaded;  // logged inside; nothing else to do here
+            // Ephemeral (D-515 B12 (a)): a synthetic session restores nothing — the fresh-install state (no ledger
+            // replay either), so the Seed below runs on the empty portfolio, as it does on a first boot.
+            if (!paper_persist_off) {
+                // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed
+                // oms_state_flags (S3a); set at OrderManager_Init from cfg; drainer-path
+                // single source of truth (S4).
+                int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
+                                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED),
+                                                      &cfg);  // v5.5.5
+                (void)loaded;  // logged inside; nothing else to do here
+            }
             // P4-pre-1 (amendment L; gate V8): seed the composer's per-slot residual
             // trackers from the restored Position set — the snapshot restores positions +
             // node_open_notional but nothing populated agg.slot_notional, so the first
@@ -1393,7 +1421,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //----------------------------------------------------------------------
     std::thread producer([&producer_done, &ticks_produced, &bcfg, &latest_tick,
                           &cfg, &state, &oms, num_nodes, use_synthetic, tsc_ghz,
-                          &ema_price, &ema_alpha, live_trading,
+                          &ema_price, &ema_alpha, paper_persist_off,   // D-518 call 4: the slot that carried live_trading
                           &paper_reset_in_progress,
                           &topo_hot_cpu, &topo_slow_cpu, &topo_poll_interval,
                           topo_producer_cpu, topo_drainer_cpu, topo_nproc] {
@@ -1433,7 +1461,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif
         auto fan_out = [num_nodes, &seq, &ticks_produced, &latest_tick,
                         &cfg, &state, &oms, &slow_path_counter, slow_path_interval, tsc_ghz,
-                        &ema_price, ema_alpha, live_trading,
+                        &ema_price, ema_alpha, paper_persist_off,
                         &paper_reset_in_progress,
                         &topo_hot_cpu, &topo_slow_cpu, &topo_poll_interval,
                         topo_producer_cpu, topo_drainer_cpu, topo_nproc,
@@ -1443,7 +1471,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             return tt::EngineSharded_Async_FanOut<F>(
                 price_d, volume_d, ts_us, is_buyer_maker,
                 // by-value captures
-                num_nodes, slow_path_interval, tsc_ghz, ema_alpha, live_trading,
+                num_nodes, slow_path_interval, tsc_ghz, ema_alpha, paper_persist_off,
                 topo_producer_cpu, topo_drainer_cpu, topo_nproc,
                 // by-ref captures
                 seq, ticks_produced, latest_tick,
@@ -1757,7 +1785,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
             slow_paths.emplace_back([c, sp_cpu, &state, &oms, &cfg,   // E.1.3 P0: `nodes` is block-scope static — referenced directly, never captured
                                       &ticks_produced, &latest_tick,
-                                      &paper_reset_in_progress]() {
+                                      &paper_reset_in_progress
+#ifdef USE_IMGUI_GUI
+                                      , learned_state   // the GUI-only hot-swap's learned-state mode (D-518 call 4) — the headless closure is untouched
+#endif
+                                      ]() {
                 // v5.0.2: best-effort pin to chosen CPU. Failure logged,
                 // execution continues unpinned.
                 if (sp_cpu >= 0) {
@@ -1931,7 +1963,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             ? cfg.ml_backend
                                             : MODEL_BACKEND_XGBOOST;
                                         int rc = tt::HotSwap_ShadowLoad_Ensemble<F>(
-                                            state, c, cfg, new_path, swap_backend);
+                                            state, c, cfg, new_path, swap_backend,
+                                            learned_state);   // the session's mode — FRESH_ONLY in a synthetic one (D-516)
                                         if (rc != 0) {
                                             // Pre-swap state preserved automatically;
                                             // helper already logged the specific
@@ -2545,7 +2578,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // (Commit 3 also closed the P2-d brace slip that had nested this save inside the
     // slow-paths `if`, and moved the bandit-state save below it — that save had run BEFORE
     // any join, while the slow threads and the composer were still writing bandit weights.)
-    if (!live_trading) {
+    // Ephemeral (D-516): a synthetic session saves nothing — `paper_persist_off` is live || synthetic.
+    if (!paper_persist_off) {
         // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
                                       BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {

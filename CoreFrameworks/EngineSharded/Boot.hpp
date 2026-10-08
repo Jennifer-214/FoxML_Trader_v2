@@ -7,12 +7,14 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[boot-time shared globals + the SIGINT/SIGTERM handler — C++17 inline single-storage discipline; the synthetic feed's announcement (CS-282)]
+// [OVERVIEW]_[boot-time shared globals + the SIGINT/SIGTERM handler — C++17 inline single-storage discipline; the synthetic feed's announcement (CS-282) and its two refusals (D-518)]
 // [REFERENCE]_[DESIGN_SPEC]_[cpp17-inline-variable-for-header-shared-state]
 // [CONTAINS]
 //   - [FUNCTION]_[EngineSharded_SignalHandler]
 //   - [FUNCTION]_[EngineSharded_SyntheticFeedWarn]
 //   - [FUNCTION]_[EngineSharded_SyntheticFeedReminder]
+//   - [FUNCTION]_[EngineSharded_SyntheticLiveRefuse]
+//   - [FUNCTION]_[EngineSharded_SyntheticPaperResetRefused]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -22,6 +24,7 @@
 //   - g_engine_sharded_gui_quit_ptr — pointer to GUI's quit_requested flag (signal lockstep)
 //   - EngineSharded_SignalHandler — SIGINT handler installed by EngineSharded_Run
 //   - EngineSharded_SyntheticFeedWarn / _SyntheticFeedReminder — a synthetic feed says so, loudly (CS-282)
+//   - EngineSharded_SyntheticLiveRefuse / _SyntheticPaperResetRefused — what a synthetic session refuses (D-518)
 //
 // **C++17 inline-variable discipline (Decision C of .B.6 plan body):**
 // Both globals declared `inline` (not `static`) for single shared storage across all TUs
@@ -98,7 +101,14 @@ extern "C" inline void EngineSharded_SignalHandler(int sig) {
 // headless engine has today: a WARN line (logging/<log_file>), ONE health.jsonl WARN record, and a
 // reminder while it lasts. They take the line's sink so a cell pins the words through fmemopen;
 // which arm calls them is Run.hpp's (the offline boot smoke pins that). Interim by construction:
-// SYN removes the synthetic source and these with it (deleting `use_synthetic` red-builds each caller).
+// SYN removes the synthetic source and these with it (deleting `use_synthetic` red-builds each caller;
+// the paper-reset refusal's caller keys on `paper_persist_off`, so deleting its helper here is what
+// red-builds that one).
+//
+// The session they announce is EPHEMERAL (D-514 call 2 / D-515 B12 / D-516 / D-518): each durable sink
+// takes its existing off-mode at boot, so nothing derived from the fabricated ticks is kept; the depth
+// recorder stays on (it records only real market data). Live never runs on synthetic ticks — refused
+// before any live init, so `use_synthetic` implies paper for every sink keyed on it.
 //------------------------------------------------------------------------------------------------------
 
 //======================================================================
@@ -111,19 +121,21 @@ extern "C" inline void EngineSharded_SignalHandler(int sig) {
 // [CODE]
 //======================================================================
 inline void EngineSharded_SyntheticFeedWarn(FILE* out, bool forced) {
-    // the consequence reads the same either way: a synthetic run's fills reach the paper ledger,
-    // the snapshot and the learned state exactly like a market run's
+    // the consequence reads the same either way: the session is EPHEMERAL — nothing it produces is
+    // kept, and the line names exactly what is not (D-515 B12 (c))
     if (forced) {
         // never "unavailable" — the stream was not even tried (I-1 F-2)
         fprintf(out, "[sharded] WARN: SYNTHETIC ticks by request (sharded_force_synthetic=1) — a ~$60,100 "
-                     "sawtooth, NOT market data; this run's fills, P&L, snapshot and learned state are "
-                     "fabricated — and kept, like a market run's — set sharded_force_synthetic=0 and restart "
-                     "to trade on market data\n");
+                     "sawtooth, NOT market data; nothing this run produces is kept (no OMS ledger, snapshot, "
+                     "trade CSVs, calibration log, learned state or tick tape — the depth recorder stays on: "
+                     "real market data only) — set sharded_force_synthetic=0 and restart to trade on market "
+                     "data\n");
     } else {
         fprintf(out, "[sharded] WARN: market data stream UNAVAILABLE (the [BINANCE] line above names the "
                      "failed step) — trading on SYNTHETIC ticks, a ~$60,100 sawtooth that is NOT market data; "
-                     "this run's fills, P&L, snapshot and learned state are fabricated — and kept, like a "
-                     "market run's — fix the network and restart\n");
+                     "nothing this run produces is kept (no OMS ledger, snapshot, trade CSVs, calibration log, "
+                     "learned state or tick tape — the depth recorder stays on: real market data only) — fix "
+                     "the network and restart\n");
     }
     // free text, never parsed — the cause is the line's own wording key; no identifier coined (H21)
     Health_Log(HEALTH_WARN, "engine", -1, "boot_warn feed=synthetic cause=%s",
@@ -152,6 +164,60 @@ inline void EngineSharded_SyntheticFeedReminder(FILE* out, uint64_t produced) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_SyntheticFeedReminder]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_SyntheticLiveRefuse]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [BOOT_TIME] [CAPITAL_BEARING] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[live NEVER runs on synthetic ticks (D-518 call 3): the boot's FATAL line, worded by the feed's cause with the remedy, plus ONE health.jsonl CRITICAL boot_abort record; the caller returns before any live init]
+// [REFERENCE]_[DECISION]_[[D-518]]
+//======================================================================
+// [CODE]
+//======================================================================
+inline void EngineSharded_SyntheticLiveRefuse(FILE* out, bool forced) {
+    // real orders priced off a fabricated sawtooth would move real money — and the ephemeral session keys every
+    // durable sink on the synthetic feed, so live would also lose the ledger for its real fills
+    if (forced) {
+        fprintf(out, "[sharded] FATAL: trading_mode=live with SYNTHETIC ticks by request "
+                     "(sharded_force_synthetic=1) — refusing to start: live trading never runs on fabricated "
+                     "prices; set sharded_force_synthetic=0, or trading_mode=paper\n");
+    } else {
+        fprintf(out, "[sharded] FATAL: trading_mode=live but the market data stream is UNAVAILABLE (the "
+                     "[BINANCE] line above names the failed step) — refusing to start: live trading never runs "
+                     "on SYNTHETIC ticks; fix the network and restart, or use trading_mode=paper\n");
+    }
+    // a refusal to boot is operator-blocking — CRITICAL, like the sister boot_abort (D-514 STATUS (iii));
+    // free text, never parsed — no identifier coined (H21)
+    Health_Log(HEALTH_CRITICAL, "engine", -1, "boot_abort reason=synthetic_feed_live cause=%s",
+               forced ? "sharded_force_synthetic" : "market_stream_unavailable");
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SyntheticLiveRefuse]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_SyntheticPaperResetRefused]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [PRODUCER] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the GUI's Reset Paper, refused in a synthetic session (D-518 call 4): ONE line — the reset's archive would write the fabricated session into data/paper_resets/ beside the real ones; no health record (it prints on the producer thread)]
+// [REFERENCE]_[DECISION]_[[D-518]]
+//======================================================================
+// [CODE]
+//======================================================================
+inline void EngineSharded_SyntheticPaperResetRefused(FILE* out) {
+    fprintf(out, "[sharded] WARN: paper reset REFUSED — this session runs on SYNTHETIC ticks and keeps nothing; "
+                 "a reset would archive its fabricated state into data/paper_resets/ beside your real sessions — "
+                 "restart on the market data stream to reset paper state\n");
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_SyntheticPaperResetRefused]
 //======================================================================
 
 } // namespace tt

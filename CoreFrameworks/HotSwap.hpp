@@ -70,7 +70,8 @@ inline int HotSwap_ShadowLoad_Ensemble(
     int node_idx,
     const ControllerConfig<F>& cfg,
     const char* new_path,
-    int swap_backend) {
+    int swap_backend,
+    EzooLearnedState learned) {   // the session's mode, resolved once at boot — FRESH_ONLY in a synthetic session (D-516 / D-518)
 
     if (!new_path || new_path[0] == '\0') {
         fprintf(stderr,
@@ -218,10 +219,11 @@ inline int HotSwap_ShadowLoad_Ensemble(
     // ────────────────────────────────────────────────────────────────────
     // (4) Canonical post-load setup (X-macro registry FOREACH_ENSEMBLE_POST_LOAD).
     // Same shape as boot + legacy in-place hot-swap; just on new_ezoo. The
-    // state dir binds to new_path (LIVE/paper semantics — the same dir the boot
-    // sister binds; E.1.5 B re-homes both).
+    // state dir binds to new_path as the session's mode says — BIND (LIVE/paper
+    // semantics — the same dir the boot sister binds; E.1.5 B re-homes both), or
+    // FRESH_ONLY in a synthetic session, which binds, loads and saves nothing (D-516).
     // ────────────────────────────────────────────────────────────────────
-    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path, EzooLearnedState::BIND);
+    EnsembleModelZoo_PostLoadSetup<F>(new_ezoo, cfg, node_idx, new_path, learned);
 
     // ────────────────────────────────────────────────────────────────────
     // (4b) D-483 C — a swap INTO a state dir another node or process holds is
