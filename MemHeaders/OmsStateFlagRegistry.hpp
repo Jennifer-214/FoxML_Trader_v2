@@ -25,10 +25,11 @@
 // SAME bitmap word via multi-bit slots.
 //
 // HYBRID PATTERN (v5.15.5.C.3 Phase 3b): single-bit flags + multi-bit slots
-// share the uint8_t. Layout:
-//   bits 0..2  — single-bit flags (FOREACH_OMS_STATE_FLAG, 3 entries today)
+// share the uint8_t. Every position is EXPLICIT in its registry row (D-526) and
+// the layout assert below is generated over BOTH registries. Layout:
+//   bits 0..2  — single-bit flags (FOREACH_OMS_STATE_FLAG)
 //   bits 3..4  — EVENT_LOG_MODE (FOREACH_OMS_STATE_MULTI_BIT, 2-bit slot, K=4 states)
-//   bits 5..7  — RESERVED for future cfg-derived flags or multi-bit slots
+//   bits 5..7  — free for a future flag or slot
 //
 // First codebase application of single-bit + multi-bit cohabitation in one
 // bitmap word. Companion: OmsExitPredictorMetaRegistry.hpp uses a similar
@@ -67,15 +68,18 @@
 // is SKIP_PERSIST (cfg-derived; wire format unchanged across this addition).
 //
 // Adding a new single-bit COLD-cluster bool (1 row in FOREACH_OMS_STATE_FLAG):
-//   1. Append X(NAME, "doc") to FOREACH_OMS_STATE_FLAG
+//   1. Append X(NAME, bit, "doc") with a FREE bit — the generated layout assert
+//      refuses one that a flag or a slot already holds
 //   2. Auto-generated OMS_STATE_FLAG_<NAME> bit position + MASK_OMS_STATE_<NAME>
 //   3. Migrate writer sites: oms.NAME = 1 → OMS_STATE_FLAG_SET(oms, NAME)
 //   4. Migrate reader sites: if (oms.NAME) → OMS_STATE_FLAG_IS_SET(oms, NAME)
+//   Never MOVE an existing flag or slot to make room: every reader's machine code
+//   carries the mask and shift as immediates, so a move changes the code of every
+//   reader (D-526 measured it — plans/v5.15-live-readiness/plan_checks/2026-10-09-d526-claims/).
 //
 // Adding a new K-state COLD-cluster slot (1 row in FOREACH_OMS_STATE_MULTI_BIT):
-//   1. Append X(NAME, bits, shift, "doc") to FOREACH_OMS_STATE_MULTI_BIT
-//   2. Pick SHIFT >= OMS_STATE_FLAG_COUNT (after single-bit flag region) +
-//      after any prior multi-bit slots. static_assert below catches overlaps.
+//   1. Append X(NAME, bits, shift, "doc") to FOREACH_OMS_STATE_MULTI_BIT, in free bits
+//   2. The generated layout assert refuses an overlap with any flag or slot
 //   3. Auto-generated MASK_OMS_STATE_<NAME> + SHIFT_OMS_STATE_<NAME> + BITS_OMS_STATE_<NAME>
 //   4. Migrate accessor sites: oms.NAME = val → MBS_SET_U8(oms.oms_state_flags, ...)
 //      and `if (oms.NAME == val)` → `if (MBS_EQ_U8(oms.oms_state_flags, ..., val))`
@@ -104,8 +108,9 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[3 BIT_FLAG rows (LIVE_TRADING / PARTIAL_EXIT_ENABLED / KILL_SWITCH_TRIPPED) -> sequential bits 0..2 of the hybrid word + MASK_OMS_STATE_<name> constants]
+// [OVERVIEW]_[BIT_FLAG rows (LIVE_TRADING / PARTIAL_EXIT_ENABLED / KILL_SWITCH_TRIPPED), each at an EXPLICIT bit of the hybrid word (D-526) + MASK_OMS_STATE_<name> constants; per-row range asserts ride, the layout assert over both registries follows FOREACH_OMS_STATE_MULTI_BIT]
 // [COLUMN]_[name]_[UPPERCASE token; produces the OMS_STATE_FLAG_<name> bit + MASK_OMS_STATE_<name> constant]
+// [COLUMN]_[bit]_[the flag's bit position, 0..7 — explicit, never derived from row order; a FREE bit (the layout assert refuses one a flag or slot holds)]
 // [COLUMN]_[doc_string]_[human-readable description for audits + docs]
 //======================================================================
 // [CODE]
@@ -113,58 +118,64 @@ namespace tt {
 #define FOREACH_OMS_STATE_FLAG(X)                                                                       \
     /* Live-trading mode flag. Set ONCE at engine init from cfg.live_trading. Gates Submit-time      */ \
     /* exchange-adapter dispatch (paper mode short-circuits; live mode calls adapter callbacks).     */ \
-    X(LIVE_TRADING,                                                                                     \
+    X(LIVE_TRADING, 0,                                                                                  \
       "live-trading mode: 0 = paper (adapter callbacks suppressed); 1 = live (adapter required)")       \
     /* Partials geometry mirrored from cfg.lifecycle_cfg_flags. Set ONCE at engine init; drainer     */ \
     /* uses it for slot→node_id mapping (Sharded_LegSlot). Toggle requires snapshot v3 reload.      */ \
-    X(PARTIAL_EXIT_ENABLED,                                                                             \
+    X(PARTIAL_EXIT_ENABLED, 1,                                                                          \
       "partials enabled: 0 = slot==node_id; 1 = slot = 2*node_id+leg (leg A/B per core)")               \
     /* Kill switch trip state. Set by the composer only (the drawdown gate, or a consumed GLOBAL     */ \
     /* lane of kill_trip_request — D-479). LIVE: never cleared at runtime (restart-only, D-481/   */ \
     /* TD-328). PAPER: the composer-executed paper reset clears it (DO_RESET; D-481 paper clause). */ \
     /* Tripping clears every registered core's permission with RELEASE; idempotent. Persisted as   */ \
     /* int (4 bytes) in snapshot — wire format preserved.                                           */ \
-    X(KILL_SWITCH_TRIPPED,                                                                              \
+    X(KILL_SWITCH_TRIPPED, 2,                                                                           \
       "OMS-wide kill switch tripped; entries blocked until manual resume")
 
 //------------------------------------------------------------------
 // [SECTION]_[AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]
 //------------------------------------------------------------------
-#define X_GEN_OMS_STATE_BIT(name, doc) OMS_STATE_FLAG_##name,
+// The bit is the row's own column — never row order, so appending a row can never renumber another flag. No COUNT
+// sentinel: with explicit positions an enum's next value is not a count (FOREACH_OMS_STATE_FLAG_COUNT below is).
+#define X_GEN_OMS_STATE_BIT(name, bit, doc) OMS_STATE_FLAG_##name = (bit),
 enum OmsStateFlag {
     FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_BIT)
-    OMS_STATE_FLAG_COUNT  // sentinel
 };
 #undef X_GEN_OMS_STATE_BIT
 
-#define X_GEN_OMS_STATE_MASK(name, doc) \
-    static constexpr uint8_t MASK_OMS_STATE_##name = BITMAP_BIT_U8(OMS_STATE_FLAG_##name);
+#define X_GEN_OMS_STATE_MASK(name, bit, doc) \
+    inline constexpr uint8_t MASK_OMS_STATE_##name = BITMAP_BIT_U8(bit);
 FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_MASK)
 #undef X_GEN_OMS_STATE_MASK
 
-// [ASSERT]_[BITMAP_OVERFLOW]_[OMS_STATE_FLAG_COUNT <= 8]
-static_assert(OMS_STATE_FLAG_COUNT <= 8,
-              "oms_state_flags is uint8_t; max 8 entries. Widen to uint16_t "
-              "if adding a 9th — and update the field type on OrderManagerState.");
+// [ASSERT]_[BITMAP_OVERFLOW]_[every flag's bit inside the uint8_t — one assert per row]
+#define X_GEN_OMS_STATE_BIT_RANGE(name, bit, doc)                                                          \
+    static_assert((bit) >= 0 && (bit) < 8, "OMS state flag " #name ": bit outside the uint8_t "            \
+                  "oms_state_flags (0..7) — pick a free bit, or widen the word (and every BITMAP_*_U8 accessor)");
+FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_BIT_RANGE)
+#undef X_GEN_OMS_STATE_BIT_RANGE
 
 // Public count for tests (uses >= per /readiness Check 21).
-#define X_GEN_OMS_STATE_COUNT_ONE(name, doc) +1
+#define X_GEN_OMS_STATE_COUNT_ONE(name, bit, doc) +1
 #define FOREACH_OMS_STATE_FLAG_COUNT (0 FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_COUNT_ONE))
 //======================================================================
 // [END_CODE]
 //======================================================================
 // [COMMENT]
 //----------------------------------------------------------------------
-// Tuple: X(name, doc_string)
+// Tuple: X(name, bit, doc_string)
 //   name       — UPPERCASE token; produces OMS_STATE_FLAG_<name> bit position
 //                + MASK_OMS_STATE_<name> uint8_t mask constant
+//   bit        — the flag's EXPLICIT position (0..7)
 //   doc_string — human-readable description for audits + docs
 //
-// 3 single-bit entries (bits 0..2). Growth caveat — HYBRID word: bits 3..4
-// host the EVENT_LOG_MODE multi-bit slot, so a 4th single-bit flag collides
-// there (the overlap static_assert catches it); adding one means bumping
-// EVENT_LOG_MODE's SHIFT (bits 5..7 are free) or widening to uint16_t —
-// NOT simply appending until the <=8 overflow assert fires.
+// HYBRID word: bits 3..4 host the EVENT_LOG_MODE slot, so the next flag takes a FREE
+// bit (5..7) — written in its row, checked by the layout assert below the multi-bit
+// registry (it refuses a bit any flag or slot already holds). Until D-526 the bit came
+// from row order, so a 4th flag landed on bit 3 inside EVENT_LOG_MODE's slot, and
+// "bump EVENT_LOG_MODE's SHIFT" was the documented way out — which changes the machine
+// code of every EVENT_LOG_MODE reader (the mask and shift are immediates). Never move
+// an existing flag or slot; take a free bit, or widen the word.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_OMS_STATE_FLAG]
 //======================================================================
@@ -174,10 +185,10 @@ static_assert(OMS_STATE_FLAG_COUNT <= 8,
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[K-state slots co-located in the SAME uint8_t (EVENT_LOG_MODE 2b@3, K=4 capacity; OmsEventLogMode enum + hybrid overlap/capacity asserts ride); explicit SHIFTs for at-a-glance layout]
+// [OVERVIEW]_[K-state slots co-located in the SAME uint8_t (EVENT_LOG_MODE 2b@3, K=4 capacity; OmsEventLogMode enum + its capacity assert ride); explicit SHIFTs for at-a-glance layout; per-row range asserts + the layout assert over BOTH registries generated (TECH_DEBT-042)]
 // [COLUMN]_[name]_[UPPERCASE token; produces BITS/SHIFT/MASK_OMS_STATE_<name>]
 // [COLUMN]_[bits]_[slot width (compile-time int constant; 1..8)]
-// [COLUMN]_[shift]_[slot bit position; >= OMS_STATE_FLAG_COUNT and clear of prior slots (asserts enforce)]
+// [COLUMN]_[shift]_[slot bit position; in FREE bits — clear of every flag and every other slot (the generated layout assert enforces)]
 // [COLUMN]_[doc_string]_[human-readable description for audits + docs]
 //======================================================================
 // [CODE]
@@ -198,31 +209,45 @@ static_assert(OMS_STATE_FLAG_COUNT <= 8,
 // [SECTION]_[AUTO-GENERATED MULTI-BIT SLOT CONSTANTS]
 //------------------------------------------------------------------
 #define X_GEN_OMS_STATE_MULTI_BIT(name, bits, shift, doc)                                             \
-    static constexpr uint8_t BITS_OMS_STATE_##name  = (uint8_t)(bits);                                \
-    static constexpr uint8_t SHIFT_OMS_STATE_##name = (uint8_t)(shift);                               \
-    static constexpr uint8_t MASK_OMS_STATE_##name  =                                                 \
+    inline constexpr uint8_t BITS_OMS_STATE_##name  = (uint8_t)(bits);                                \
+    inline constexpr uint8_t SHIFT_OMS_STATE_##name = (uint8_t)(shift);                               \
+    inline constexpr uint8_t MASK_OMS_STATE_##name  =                                                 \
         (uint8_t)(((1u << (bits)) - 1) << (shift));
 FOREACH_OMS_STATE_MULTI_BIT(X_GEN_OMS_STATE_MULTI_BIT)
 #undef X_GEN_OMS_STATE_MULTI_BIT
 
-// Compile-time sanity:
-//   - Multi-bit slots fit in uint8_t (highest used bit < 8).
-//   - Multi-bit slots don't overlap with single-bit flag region (bits 0..OMS_STATE_FLAG_COUNT-1).
-//   - Multi-bit slots don't overlap with each other.
-//
-// Single-bit flag region (bits 0..N-1 where N = OMS_STATE_FLAG_COUNT):
-static constexpr uint8_t _OMS_STATE_SINGLE_BIT_REGION =
-    (uint8_t)((1u << OMS_STATE_FLAG_COUNT) - 1u);
+// [ASSERT]_[BITMAP_OVERFLOW]_[every slot non-empty and inside the uint8_t — one assert per row]
+#define X_GEN_OMS_STATE_SLOT_RANGE(name, bits, shift, doc)                                                 \
+    static_assert((bits) >= 1 && (shift) >= 0 && (shift) + (bits) <= 8, "OMS state slot " #name ": "       \
+                  "empty (bits < 1) or outside the uint8_t oms_state_flags (shift + bits must be <= 8) — pick free bits, or widen " \
+                  "the word (and every BITMAP_*_U8 / MBS_*_U8 accessor)");
+FOREACH_OMS_STATE_MULTI_BIT(X_GEN_OMS_STATE_SLOT_RANGE)
+#undef X_GEN_OMS_STATE_SLOT_RANGE
 
-// EVENT_LOG_MODE-specific overlap check (extend with similar checks per added slot):
-// [ASSERT]_[LAYOUT_LOCK]_[(EVENT_LOG_MODE_MASK & single-bit region) == 0]
-static_assert((MASK_OMS_STATE_EVENT_LOG_MODE & _OMS_STATE_SINGLE_BIT_REGION) == 0,
-              "EVENT_LOG_MODE multi-bit slot overlaps single-bit flag region; "
-              "increase SHIFT_OMS_STATE_EVENT_LOG_MODE or compact the single-bit cohort");
-// [ASSERT]_[BITMAP_OVERFLOW]_[EVENT_LOG_MODE SHIFT + BITS <= 8]
-static_assert(SHIFT_OMS_STATE_EVENT_LOG_MODE + BITS_OMS_STATE_EVENT_LOG_MODE <= 8,
-              "EVENT_LOG_MODE slot overflows uint8_t; widen oms_state_flags to uint16_t "
-              "(and update the field type on OrderManagerState + BITMAP_BIT_U8 → BITMAP_BIT_U16 throughout)");
+// [ASSERT]_[LAYOUT_LOCK]_[no two rows of EITHER registry share a bit — generated, TECH_DEBT-042]
+// One table of every mask in the word — each flag, then each slot — and one check over it: no mask overlapping any
+// earlier one (an EMPTY mask cannot reach it — each row's range assert above refuses one). It replaces the hand-rolled per-slot asserts (EVENT_LOG_MODE vs a single-bit region
+// derived from the flag COUNT — which stopped describing the layout once positions became explicit), so a flag or a
+// slot added to either registry is checked against every other row with no assert to write.
+#define X_GEN_OMS_STATE_FLAG_MASK_ELEM(name, bit, doc) MASK_OMS_STATE_##name,
+#define X_GEN_OMS_STATE_SLOT_MASK_ELEM(name, bits, shift, doc) MASK_OMS_STATE_##name,
+inline constexpr uint8_t _OMS_STATE_LAYOUT_MASKS[] = {
+    FOREACH_OMS_STATE_FLAG(X_GEN_OMS_STATE_FLAG_MASK_ELEM)
+    FOREACH_OMS_STATE_MULTI_BIT(X_GEN_OMS_STATE_SLOT_MASK_ELEM)
+};
+#undef X_GEN_OMS_STATE_FLAG_MASK_ELEM
+#undef X_GEN_OMS_STATE_SLOT_MASK_ELEM
+constexpr bool _OmsState_LayoutDisjoint() {
+    uint8_t held = 0;
+    for (uint8_t m : _OMS_STATE_LAYOUT_MASKS) {
+        if ((held & m) != 0) return false;
+        held = (uint8_t)(held | m);
+    }
+    return true;
+}
+static_assert(_OmsState_LayoutDisjoint(),
+              "oms_state_flags layout: two rows of FOREACH_OMS_STATE_FLAG / FOREACH_OMS_STATE_MULTI_BIT share a bit "
+              "— give the new row a FREE bit; never move an existing one (D-526)");
 
 // EVENT_LOG_MODE value-capacity check (K <= slot width):
 // EVENT_LOG_MODE has K=2 used today (legacy/event-log); K=4 supported by 2-bit slot.
@@ -250,15 +275,15 @@ static_assert(OMS_EVENT_LOG_MODE_COUNT <= (1u << BITS_OMS_STATE_EVENT_LOG_MODE),
 // Tuple: X(name, bits, shift, doc_string)
 //   name       — UPPERCASE token; produces BITS/SHIFT/MASK_OMS_STATE_<name>
 //   bits       — slot width (compile-time int constant; 1..8)
-//   shift      — slot bit position (compile-time int constant; MUST be
-//                 >= OMS_STATE_FLAG_COUNT to avoid overlap with single-bit
-//                 region; MUST not overlap with prior multi-bit slots)
+//   shift      — slot bit position (compile-time int constant; MUST sit in
+//                 FREE bits — clear of every single-bit flag and every other
+//                 slot; the generated layout assert refuses an overlap)
 //   doc_string — human-readable description for audits + docs
 //
 // Slot positions are explicit (not auto-derived from preceding slot widths)
-// for review-readability — operator sees the bit layout at a glance. The
-// static_asserts in-fence validate no overlap between single-bit region +
-// multi-bit slots, and no overlap between multi-bit slots.
+// for review-readability — operator sees the bit layout at a glance; since
+// D-526 the single-bit flags' positions are explicit too. The generated asserts
+// check every row's range and that no two rows of either registry share a bit.
 //======================================================================
 // [END_REGISTRY]_[FOREACH_OMS_STATE_MULTI_BIT]
 //======================================================================

@@ -122,8 +122,8 @@
     X(FOREACH_ENSEMBLE_POST_LOAD                , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "EnsembleModelZoo post-load setup steps.") \
     X(FOREACH_OMS_PER_SLOT_FIELD                , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "OMS per-slot position fields.") \
     X(FOREACH_OMS_META_SLOT                     , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "OMS meta-slot fields (entry/exit tracking).") \
-    X(FOREACH_OMS_STATE_FLAG                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "OMS state bit flags (LIVE_TRADING / PARTIAL_EXIT / etc.).") \
-    X(FOREACH_OMS_STATE_MULTI_BIT               , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "OMS multi-bit state slots (EVENT_LOG_MODE / etc.).") \
+    X(FOREACH_OMS_STATE_FLAG                    , 1,      FOREACH_REGISTRY                 , "SSOT",                      "OMS state bit flags (LIVE_TRADING / PARTIAL_EXIT / etc.) — the rows ARE the word's flag set, each at an explicit bit; the layout assert spans both OMS registries (D-526).") \
+    X(FOREACH_OMS_STATE_MULTI_BIT               , 1,      FOREACH_REGISTRY                 , "SSOT",                      "OMS multi-bit state slots (EVENT_LOG_MODE / etc.) — the rows ARE the word's slot set; the layout assert spans both OMS registries (D-526).") \
     X(FOREACH_POSITION_FIELD                    , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Position struct fields (full persistence).") \
     X(FOREACH_POSITION_FIELD_SKIP_PERSIST       , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Position fields skipped from persistence.") \
     X(FOREACH_BACKTEST_METRIC                   , 1,      FOREACH_REGISTRY                 , "UNCLASSIFIED",              "Backtest summary metrics.") \
