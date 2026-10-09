@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[OrderManagerState COLD-cluster uint8_t oms_state_flags SSoT — HYBRID word: 3 single-bit flags (bits 0..2) + the 2-bit EVENT_LOG_MODE slot (bits 3..4); bits 5..7 reserved]
+// [OVERVIEW]_[OrderManagerState COLD-cluster uint8_t oms_state_flags SSoT — HYBRID word: single-bit flags at explicit bits (0..2, 5) + the 2-bit EVENT_LOG_MODE slot (bits 3..4); bits 6..7 free]
 // [CONTAINS]
 //   - [REGISTRY]_[FOREACH_OMS_STATE_FLAG]        (auto-gen bits/masks + overflow assert + count ride)
 //   - [REGISTRY]_[FOREACH_OMS_STATE_MULTI_BIT]   (slot constants + OmsEventLogMode enum + hybrid overlap/capacity asserts ride)
@@ -29,7 +29,8 @@
 // the layout assert below is generated over BOTH registries. Layout:
 //   bits 0..2  — single-bit flags (FOREACH_OMS_STATE_FLAG)
 //   bits 3..4  — EVENT_LOG_MODE (FOREACH_OMS_STATE_MULTI_BIT, 2-bit slot, K=4 states)
-//   bits 5..7  — free for a future flag or slot
+//   bit  5     — PAPER_PERSIST (FOREACH_OMS_STATE_FLAG — the first flag placed past the slot, D-526)
+//   bits 6..7  — free for a future flag or slot
 //
 // First codebase application of single-bit + multi-bit cohabitation in one
 // bitmap word. Companion: OmsExitPredictorMetaRegistry.hpp uses a similar
@@ -44,7 +45,8 @@
 //
 // All flags + slots are single-thread (boot-set or paper-reset; never
 // cross-thread mutated):
-//   - LIVE_TRADING:         set ONCE at engine init from cfg.live_trading.
+//   - LIVE_TRADING:         set ONCE at OrderManager_Init from the OmsSession (LIVE — D-526; the boot derives the
+//                            session from ControllerConfig_IsLiveCapital, the one live-capital predicate).
 //   - PARTIAL_EXIT_ENABLED: set ONCE at engine init from cfg lifecycle
 //                            flags; toggle requires snapshot v3 reload.
 //   - KILL_SWITCH_TRIPPED:  set by the composer only — the per-OMS drawdown
@@ -55,6 +57,10 @@
 //                            EventLoop_Unpause was deleted at 3b(ii) commit 1). In PAPER
 //                            the composer-executed paper reset clears it as a DO_RESET
 //                            row (D-481 paper clause, 2026-09-04).
+//   - PAPER_PERSIST:        set ONCE at OrderManager_Init from the OmsSession (PAPER — D-526). The paper snapshot
+//                            loads / saves (ShardedSnapshot_Load / _Save refuse without it) and the paper reset runs
+//                            (its executor refuses without it) ONLY in a PAPER session; LIVE and EPHEMERAL leave it
+//                            clear. Boot-latched: SKIP_RESET, SKIP_PERSIST.
 //   - EVENT_LOG_MODE:       set ONCE at OrderManager_Init from
 //                            cfg.oms_event_log_mode; read by drainer +
 //                            backtest hot paths (single thread per OMS).
@@ -108,7 +114,7 @@ namespace tt {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BITMAP_PACKED] [OMS_DRAINER]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[BIT_FLAG rows (LIVE_TRADING / PARTIAL_EXIT_ENABLED / KILL_SWITCH_TRIPPED), each at an EXPLICIT bit of the hybrid word (D-526) + MASK_OMS_STATE_<name> constants; per-row range asserts ride, the layout assert over both registries follows FOREACH_OMS_STATE_MULTI_BIT]
+// [OVERVIEW]_[BIT_FLAG rows (LIVE_TRADING / PARTIAL_EXIT_ENABLED / KILL_SWITCH_TRIPPED / PAPER_PERSIST), each at an EXPLICIT bit of the hybrid word (D-526) + MASK_OMS_STATE_<name> constants; per-row range asserts ride, the layout assert over both registries follows FOREACH_OMS_STATE_MULTI_BIT]
 // [COLUMN]_[name]_[UPPERCASE token; produces the OMS_STATE_FLAG_<name> bit + MASK_OMS_STATE_<name> constant]
 // [COLUMN]_[bit]_[the flag's bit position, 0..7 — explicit, never derived from row order; a FREE bit (the layout assert refuses one a flag or slot holds)]
 // [COLUMN]_[doc_string]_[human-readable description for audits + docs]
@@ -116,8 +122,8 @@ namespace tt {
 // [CODE]
 //======================================================================
 #define FOREACH_OMS_STATE_FLAG(X)                                                                       \
-    /* Live-trading mode flag. Set ONCE at engine init from cfg.live_trading. Gates Submit-time      */ \
-    /* exchange-adapter dispatch (paper mode short-circuits; live mode calls adapter callbacks).     */ \
+    /* Live-trading mode flag. Set ONCE at OrderManager_Init from the OmsSession (LIVE — D-526).     */ \
+    /* Gates Submit-time exchange-adapter dispatch (paper short-circuits; live calls the adapter).  */ \
     X(LIVE_TRADING, 0,                                                                                  \
       "live-trading mode: 0 = paper (adapter callbacks suppressed); 1 = live (adapter required)")       \
     /* Partials geometry mirrored from cfg.lifecycle_cfg_flags. Set ONCE at engine init; drainer     */ \
@@ -130,7 +136,14 @@ namespace tt {
     /* Tripping clears every registered core's permission with RELEASE; idempotent. Persisted as   */ \
     /* int (4 bytes) in snapshot — wire format preserved.                                           */ \
     X(KILL_SWITCH_TRIPPED, 2,                                                                           \
-      "OMS-wide kill switch tripped; entries blocked until manual resume")
+      "OMS-wide kill switch tripped; entries blocked until manual resume")                               \
+    /* Paper-session persistence (D-526). Set ONCE at OrderManager_Init from the OmsSession (PAPER).  */ \
+    /* ShardedSnapshot_Load / _Save refuse without it and the paper reset's executor runs only with  */ \
+    /* it — the check at the SINK, so every route to a snapshot passes it. LIVE (exchange truth) and */ \
+    /* EPHEMERAL (a synthetic feed, the backtest, a test) leave it clear. Bit 5: the first FREE bit  */ \
+    /* past EVENT_LOG_MODE's slot — no existing bit moved.                                            */ \
+    X(PAPER_PERSIST, 5,                                                                                 \
+      "paper-session persistence: 1 = the snapshot loads / saves and the paper reset runs; 0 = each refuses")
 
 //------------------------------------------------------------------
 // [SECTION]_[AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]

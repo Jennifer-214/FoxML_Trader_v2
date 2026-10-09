@@ -1270,7 +1270,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
 //------------------------------------------------------------------------------
 // test helper that creates an OMS + wires it into the EventLoopState in one
 // call. the caller provides the OMS on the stack alongside the state. uses a
-// default-constructed (zeroed) ExchangeAdapter and live_trading=0 (paper mode).
+// default-constructed (zeroed) ExchangeAdapter and a PAPER session (D-526 — persistence allowed, as before the
+// typed session: the cells that save / load through this helper keep exercising exactly what they did).
 //------------------------------------------------------------------------------
 template <unsigned F>
 inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
@@ -1280,7 +1281,7 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
     // per-Order pre_resolved.fee_rate set at submit via Order_BindPreResolved with cfg..
     // Test fixtures that need non-zero fee accounting must populate cfg..fee_rate_*.
     ExchangeAdapter<F> empty{};
-    OrderManager_Init(oms, empty, 0, /*partial_exit_enabled=*/0, starting_balance);
+    OrderManager_Init(oms, empty, OmsSession::PAPER, /*partial_exit_enabled=*/0, starting_balance);
     EventLoopState_Init(state, oms);
 }
 

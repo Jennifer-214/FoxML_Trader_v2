@@ -634,12 +634,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         return;
     }
     // The EPHEMERAL synthetic session (D-514 call 2 / D-516 / D-518): each durable sink below takes its EXISTING
-    // off-mode, decided here once from `use_synthetic` — nothing new runs per tick. Two values carry it past boot:
-    // the paper snapshot's persistence (restore / periodic save / final save / the reset's archive) is off for live
-    // (exchange truth) and for a synthetic session — the producer reads it through the fan-out's existing argument,
-    // whose one reader is the save gate — and the learned state binds nothing in a synthetic session (FRESH_ONLY,
-    // the backtest's mode), at boot and at hot-swap. SYN deletes `use_synthetic`, red-building every reader.
-    const bool paper_persist_off = live_trading || use_synthetic;
+    // off-mode, decided here once from `use_synthetic` — nothing new runs per tick. The OMS's own sinks — its ledger,
+    // its calibration log, its paper snapshot (restore / periodic save / final save) and its paper reset — take ONE typed
+    // value, the OmsSession (D-526): LIVE (the exchange is the truth), PAPER, or EPHEMERAL (a synthetic feed — keeps
+    // nothing); the OMS derives its boot bits from it, and the snapshot / reset check them AT THE SINK. `paper_persist_off`
+    // derives from the session for the producer's save request (the fan-out's existing argument) and for the boot load
+    // and the final save, which stay quiet outside a PAPER session. The learned state binds nothing in a synthetic
+    // session (FRESH_ONLY, the backtest's mode), at boot and at hot-swap. The engine-only sinks stay keyed on
+    // `use_synthetic`, so SYN's deletion of it red-builds each of them.
+    const OmsSession oms_session = live_trading ? OmsSession::LIVE
+                                 : (use_synthetic ? OmsSession::EPHEMERAL : OmsSession::PAPER);
+    const bool paper_persist_off = (oms_session != OmsSession::PAPER);
     const EzooLearnedState learned_state = use_synthetic ? EzooLearnedState::FRESH_ONLY : EzooLearnedState::BIND;
 
     fprintf(stderr, "\n");
@@ -779,17 +784,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     int partial_exit_enabled =
         BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED. Per-core fee_rate flows via Order pre_resolve.
-    // Ephemeral (D-516): a synthetic session's OMS ledger lives in memory — an empty path takes OMS_INIT_AUTOPOPULATE
-    // Layer 4's in-memory arm (the backtest's): no replay into the balance / P&L / kill peak, no append.
-    OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
+    // Ephemeral (D-516, D-526): a synthetic session's OMS ledger lives in memory — the OMS decides from its session
+    // (OMS_INIT_AUTOPOPULATE Layer 4 keeps an EPHEMERAL session's ledger in memory whatever path it is handed): no replay
+    // into the balance / P&L / kill peak, no append.
+    OrderManager_Init(&oms, exchange_adapter, oms_session,
                       partial_exit_enabled,
                       live_starting_balance,
                       (int)cfg.oms_event_log_mode,
-                      use_synthetic ? "" : OMS_EVENT_LOG_DEFAULT_PATH);
+                      OMS_EVENT_LOG_DEFAULT_PATH);
     // v5.13.0.B — open calibration log if cfg.calibration_log_path set.
     // No-op when path is empty (default). Failure is non-fatal (logs to
-    // stderr; calibration logging disabled this session). Ephemeral: never in a synthetic session.
-    OrderManager_OpenCalibrationLog(&oms, use_synthetic ? "" : cfg.calibration_log_path);
+    // stderr; calibration logging disabled this session). Ephemeral: the OMS keeps none in an EPHEMERAL session (D-526).
+    OrderManager_OpenCalibrationLog(&oms, cfg.calibration_log_path);
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — Class 27 closure: OMS no longer holds scalar fee_rate /
     // fee_rate_maker / fee_rate_taker / slippage_pct fields. Order pre-resolves these
     // per-core via Order_BindPreResolved at submit time. See:

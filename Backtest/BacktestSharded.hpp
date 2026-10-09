@@ -228,7 +228,9 @@ static inline BacktestRunStatus BacktestSharded_Run(BacktestResults *results,
     // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED from OrderManager_Init; OMS fee_rate
     // scalar fields deleted. Per-core fee_rate now flows via cfg.nodes[c].fee_rate_maker/_taker
     // → Order_BindPreResolved at submit → o->pre_resolved.fee_rate → HandleFill.
-    OrderManager_Init(&oms, empty_adapter, 0, bt_partial_exit_enabled,
+    // D-526: a backtest keeps nothing durable — an EPHEMERAL session: its ledger stays in memory, and the paper
+    // snapshot's load / save and the paper reset refuse at their sinks, so no backtest can write the paper session.
+    OrderManager_Init(&oms, empty_adapter, OmsSession::EPHEMERAL, bt_partial_exit_enabled,
                       cfg.starting_balance,
                       /*event_log_mode=*/1,
                       /*event_log_path=*/"");

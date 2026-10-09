@@ -7,9 +7,9 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[the canonical OMS field SSoT — 33 8-tuple rows driving INIT/RESET/PERSIST views via RESET_KIND x STORAGE_KIND x PERSIST_KIND token-paste; the 10-row PERSIST view IS the snapshot OMS wire block (count-pinned)]
+// [OVERVIEW]_[the canonical OMS field SSoT — 8-tuple rows driving INIT/RESET/PERSIST views via RESET_KIND x STORAGE_KIND x PERSIST_KIND token-paste; the 10-row PERSIST view IS the snapshot OMS wire block (count-pinned)]
 // [CONTAINS]
-//   - [STRUCT]_[OmsInitCtx]   (+ OmsResetCtx + _oms_now_us ride)
+//   - [STRUCT]_[OmsInitCtx]   (+ OmsResetCtx + _oms_now_us + the OmsSession type + OmsState_IsEphemeral ride — D-526)
 //   - [REGISTRY]_[FOREACH_OMS_FIELD]
 //   - [REGISTRY]_[FOREACH_OMS_PER_SLOT_FIELD]   (both registries' count sentinels + 3 asserts ride this block)
 //   - [MACRO]_[OMS_PROJECT_*]   (INIT / RESET / PERSIST / PER_SLOT dispatch views)
@@ -156,6 +156,29 @@ inline uint64_t _oms_now_us() {
 }
 
 //------------------------------------------------------------------
+// [SECTION]_[OmsSession — the kind of session an OMS serves (D-526)]
+//------------------------------------------------------------------
+// ONE typed value carries the boot's decision across OrderManager_Init — never two booleans that would have to agree
+// (Class 47: with a `live` int beside a "may persist" flag, a caller could pass live with persistence allowed, and the
+// sinks below would trust it). The init derives BOTH boot bits from it — "a live session that persists the paper
+// snapshot" has no spelling — and an enum class takes no int, so the compiler names every caller.
+//   EPHEMERAL (0 — the zero value): keeps NOTHING durable — no ledger on disk, no calibration log, no paper snapshot,
+//             no paper reset (a synthetic engine session, the backtest, a test that persists nothing)
+//   PAPER   : keeps its ledger, its calibration log, its paper snapshot and its reset archive
+//   LIVE    : keeps its ledger and its calibration log; the exchange — never the paper snapshot — is its truth
+// The engine computes it ONCE at boot (EngineSharded_Run, where `paper_persist_off` was decided); the engine-only sinks
+// (the trade CSVs, the tick tape, the learned state, notify) stay keyed on `use_synthetic` so SYN's deletion of it
+// still red-builds each of them.
+enum class OmsSession : uint8_t { EPHEMERAL = 0, PAPER = 1, LIVE = 2 };
+
+// The ONE derivation of "this OMS keeps nothing durable" from its boot bits (D-526): neither LIVE_TRADING nor
+// PAPER_PERSIST set — an EPHEMERAL session, or an OMS never initialized (deny by default). Valid once the INIT view has
+// run (OMS_INIT_AUTOPOPULATE's Layer 1). Read by the ledger's on-disk decision (Layer 4) and the calibration log.
+inline bool OmsState_IsEphemeral(uint8_t oms_state_flags) {
+    return !BITMAP_ANY(oms_state_flags, (uint8_t)(MASK_OMS_STATE_LIVE_TRADING | MASK_OMS_STATE_PAPER_PERSIST));
+}
+
+//------------------------------------------------------------------
 // [SECTION]_[OmsInitCtx<F> + OmsResetCtx<F> — context structs for templated helpers]
 //------------------------------------------------------------------
 // OmsInitCtx<F>: boot-time init args. Constructed by OMS_INIT_AUTOPOPULATE
@@ -165,7 +188,7 @@ inline uint64_t _oms_now_us() {
 // PLAIN UNPACKED fields chosen over packed boot_flags (Finding B skipped
 // 2026-05-13): stack-only with brief lifetime → byte savings don't compound,
 // but registry-row verbosity from BITMAP_IS_SET/MBS_GET_U8 expansion would
-// hurt readability per row. Plain fields make `ctx.live_trading` etc. clean
+// hurt readability per row. Plain fields make `ctx.session` etc. clean
 // 1-line registry expressions.
 //
 // Field order MUST match OMS_INIT_AUTOPOPULATE's aggregate initializer.
@@ -173,7 +196,7 @@ inline uint64_t _oms_now_us() {
 template <unsigned F>
 struct OmsInitCtx {
     const ExchangeAdapter<F>& adapter;
-    int                       live_trading;          // 0/1 — boolean
+    OmsSession                session;               // the kind of session (D-526) — LIVE_TRADING + PAPER_PERSIST derive from it
     int                       partial_exit_enabled;  // 0/1 — boolean (NEW v5.15.5.C.3 Finding A)
     int                       event_log_mode;        // 0..3 — K-state (NEW MULTI_BIT slot v5.15.5.C.3 Finding A')
     Money                             starting_balance;
@@ -209,7 +232,7 @@ struct OmsResetCtx {
 //----------------------------------------------------------------------
 // [TAG]_[[ENGINE] [OMS_DRAINER] [FRAMEWORK_DISCIPLINE] [PERSISTENCE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[33 8-tuple rows in 9 semantic groups (substrate -> BIT/MBS cfg-derived -> HOT -> the 10 wire-ordered PERSIST rows -> cfg-derived -> masks -> adapter -> atomics -> COLD)]
+// [OVERVIEW]_[8-tuple rows in 9 semantic groups (substrate -> BIT/MBS cfg-derived -> HOT -> the 10 wire-ordered PERSIST rows -> cfg-derived -> masks -> adapter -> atomics -> COLD)]
 // [COLUMN]_[NAME]_[field name on OrderManagerState (or bit/slot name for BIT/MULTI_BIT)]
 // [COLUMN]_[type]_[C++ type; cast applied at write site]
 // [COLUMN]_[INIT]_[boot value; ctx.<arg> forms reference OmsInitCtx]
@@ -236,9 +259,11 @@ struct OmsResetCtx {
     /* [2] BIT + MULTI_BIT cfg-derived rows — set bits/slots in oms_state_flags                       */                                                  \
     /* ============================================================================================ */                                                  \
     /* LIVE_TRADING bit (Finding A — moved into registry; was Layer 2 special-case)                  */                                                  \
-    X(live_trading,           int,                ctx.live_trading,             0,                            SKIP_RESET, BIT,       SKIP_PERSIST, MASK_OMS_STATE_LIVE_TRADING)        \
+    X(live_trading,           int,                (ctx.session == OmsSession::LIVE),  0,                      SKIP_RESET, BIT,       SKIP_PERSIST, MASK_OMS_STATE_LIVE_TRADING)        \
     /* PARTIAL_EXIT_ENABLED bit (Finding A — moved into registry; was engine-post-Init external SET) */                                                  \
     X(partial_exit_enabled,   int,                ctx.partial_exit_enabled,     0,                            SKIP_RESET, BIT,       SKIP_PERSIST, MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) \
+    /* PAPER_PERSIST bit (D-526) — the session's paper persistence; boot-latched, never persisted     */                                                  \
+    X(paper_persist,          int,                (ctx.session == OmsSession::PAPER), 0,                      SKIP_RESET, BIT,       SKIP_PERSIST, MASK_OMS_STATE_PAPER_PERSIST)       \
     /* EVENT_LOG_MODE 2-bit slot (Finding A' — multi-bit struct compaction; saves 4 bytes)           */                                                  \
     X(event_log_mode,         int,                ctx.event_log_mode,           0,                            SKIP_RESET, MULTI_BIT, SKIP_PERSIST, MASK_OMS_STATE_EVENT_LOG_MODE)       \
     /* ============================================================================================ */                                                  \
@@ -751,8 +776,8 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 // [SCHEMA]_[v1.0]
 // [OVERVIEW]_[the one-line OMS call sites — INIT: 5 layers (registry walk / sub-structs+per-slot / SPSC rings / event-log load+replay / async writer LAST); RESET: RST walk + Portfolio_Init]
 //----------------------------------------------------------------------
-// OMS_INIT_AUTOPOPULATE(_oms, _adapter, _live_trading, _partial_exit_enabled,
-//                        _starting_balance, _fee_rate, _event_log_mode, _event_log_path)
+// OMS_INIT_AUTOPOPULATE(_oms, _adapter, _session, _partial_exit_enabled,
+//                        _starting_balance, _event_log_mode, _event_log_path)
 //   Boot-time full init of an OrderManagerState. Five layers:
 //     Layer 1 — _oms_init_value_fields helper walks FOREACH_OMS_FIELD
 //                (DIRECT + BIT + MULTI_BIT + ATOMIC rows all dispatched
@@ -800,13 +825,13 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 // fee_rate fields deleted. Portfolio_FromEventLog passes FPN_Zero for event-log replay
 // (replay can't reconstruct per-trade fees from price+qty alone; treated as recovery-path
 // best-effort accounting, sister to Reconcile fallback semantic).
-#define OMS_INIT_AUTOPOPULATE(_oms_target, _adapter, _live_trading, _partial_exit_enabled,          \
+#define OMS_INIT_AUTOPOPULATE(_oms_target, _adapter, _session, _partial_exit_enabled,               \
                               _starting_balance, _event_log_mode, _event_log_path)                   \
     do {                                                                                            \
         /* Build context struct from caller args; ctx is referenced by registry INIT expressions */ \
         tt::OmsInitCtx<F> _oms_init_ctx{                                                            \
             (_adapter),                                                                              \
-            (_live_trading),                                                                         \
+            (_session),                                                                              \
             (_partial_exit_enabled),                                                                 \
             (_event_log_mode),                                                                       \
             (_starting_balance),                                                                     \
@@ -847,7 +872,10 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         /* Layer 4 — OrderEventLog conditional init + LoadFromDisk + replay (MUST RUN BEFORE L5) */  \
         {                                                                                            \
             const char* _evt_path = (_event_log_path);                                                \
-            int _has_disk_path = (_evt_path && _evt_path[0]);                                        \
+            /* D-526: an EPHEMERAL session keeps its ledger IN MEMORY whatever path it is handed —   */ \
+            /* the decision is the session's (its bits, set by Layer 1), never the caller's string.   */ \
+            int _has_disk_path = (_evt_path && _evt_path[0]                                          \
+                                  && !tt::OmsState_IsEphemeral((_oms_target)->oms_state_flags));     \
             if ((_event_log_mode) == 1 && _has_disk_path) {                                          \
                 OrderEventLog_Init(&(_oms_target)->event_log);                                       \
                 int _loaded = OrderEventLog_LoadFromDisk(&(_oms_target)->event_log, _evt_path);      \

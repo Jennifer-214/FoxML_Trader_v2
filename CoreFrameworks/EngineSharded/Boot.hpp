@@ -15,6 +15,7 @@
 //   - [FUNCTION]_[EngineSharded_SyntheticFeedReminder]
 //   - [FUNCTION]_[EngineSharded_SyntheticLiveRefuse]
 //   - [FUNCTION]_[EngineSharded_SyntheticPaperResetRefused]
+//   - [FUNCTION]_[EngineSharded_PaperResetRefusedAtExecutor]
 //======================================================================================================
 // Sub-file of CoreFrameworks/EngineSharded.hpp (split per file-size-split-discipline.md
 // at v5.15.5.F.4d.1.B.6; subfolder pattern first canonical).
@@ -218,6 +219,34 @@ inline void EngineSharded_SyntheticPaperResetRefused(FILE* out) {
 // [END_CODE]
 //======================================================================
 // [END_FUNCTION]_[EngineSharded_SyntheticPaperResetRefused]
+//======================================================================
+
+//======================================================================
+// [FUNCTION]_[EngineSharded_PaperResetRefusedAtExecutor]
+//----------------------------------------------------------------------
+// [TAG]_[[ENGINE] [OMS_DRAINER] [CAPITAL_BEARING] [MONITORING_PLANE]]
+// [SCHEMA]_[v1.0]
+// [OVERVIEW]_[the paper reset's EXECUTOR refused it — the session is not a PAPER one (D-526 call 4, CS-311 + CS-298's archive half): ONE line, worded by the session kind; in LIVE a defect (no requester asks in a live session), in an ephemeral session nothing to reset; no health record (the composer prints it; its requester-side sister above prints on the producer)]
+// [REFERENCE]_[DECISION]_[[D-526] [D-481]]
+//======================================================================
+// [CODE]
+//======================================================================
+inline void EngineSharded_PaperResetRefusedAtExecutor(FILE* out, bool live) {
+    if (live) {
+        // D-481: the OMS-wide kill is restart-only in LIVE, and the reset's OMS_RESET_AUTOPOPULATE would clear it
+        fprintf(out, "[sharded] CRITICAL: paper reset REFUSED at the composer — this is a LIVE session: a reset would "
+                     "wipe the live OMS and clear a tripped kill switch (restart-only, D-481); no requester asks in a "
+                     "live session, so a request that reached the composer is a defect — report it\n");
+    } else {
+        fprintf(out, "[sharded] WARN: paper reset REFUSED at the composer — this session keeps no paper state (an "
+                     "ephemeral session: a synthetic feed): there is nothing to archive or reset — restart on the "
+                     "market data stream to reset paper state\n");
+    }
+}
+//======================================================================
+// [END_CODE]
+//======================================================================
+// [END_FUNCTION]_[EngineSharded_PaperResetRefusedAtExecutor]
 //======================================================================
 
 } // namespace tt

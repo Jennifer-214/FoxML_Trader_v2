@@ -976,7 +976,7 @@ struct OrderManagerState {
 //
 // Field groups:
 //   - order table (orders[], order_bitmap, next_order_id)
-//   - exchange wiring (adapter, live_trading, result_queue)
+//   - exchange wiring (adapter, the session's boot bits in oms_state_flags — LIVE_TRADING / PAPER_PERSIST, D-526 —, result_queue)
 //   - bank state (portfolio, balance, realized_pnl, fee_rate) — phase 03
 //   - kill switch (ks_*, kill_switch_tripped, ks_trips_total) — phase 03
 //   - trade log pointer (not owned, points at the engine's CSV writer) — phase 03
@@ -1506,12 +1506,12 @@ inline constexpr const char* OMS_EVENT_LOG_DEFAULT_PATH = "logging/order_events.
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
-                              int live_trading,
+                              OmsSession session,     // D-526 — LIVE / PAPER / EPHEMERAL; never an int
                               int partial_exit_enabled,
                               Money starting_balance,
                               int event_log_mode = 0,
                               const char* event_log_path = nullptr) {   // no disk unless the caller names one
-    OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
+    OMS_INIT_AUTOPOPULATE(oms, adapter, session, partial_exit_enabled,
                           starting_balance, event_log_mode, event_log_path);
 }
 //======================================================================
@@ -1520,7 +1520,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 // [COMMENT]
 //----------------------------------------------------------------------
 // Zero the order table, clear the bitmap, install the adapter and the
-// live_trading flag. The adapter is copied by value — the caller still
+// session's boot bits (D-526: LIVE_TRADING and PAPER_PERSIST, both derived from `session`). The adapter is copied by value — the caller still
 // owns whatever the adapter.ctx points at, but the function pointers
 // and the ctx pointer are captured into the OMS for its lifetime.
 //
@@ -3093,6 +3093,9 @@ template <unsigned F>
 inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
                                              const char* path) {
     if (!path || path[0] == '\0') return 0;  // disabled — not an error
+    // D-526: an EPHEMERAL session keeps no calibration log whatever path the cfg names — the decision is the
+    // session's (its boot bits), so the caller passes the cfg path unconditionally. Not an error either.
+    if (OmsState_IsEphemeral(oms->oms_state_flags)) return 0;
     oms->calibration_log_file = std::fopen(path, "a");
     if (!oms->calibration_log_file) {
         std::fprintf(stderr,

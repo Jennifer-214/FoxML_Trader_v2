@@ -140,6 +140,17 @@ template <unsigned F>
 inline void EngineSharded_ExecutePaperReset(const ControllerConfig<F>& cfg,
                                              EventLoopState<F>& state,
                                              std::atomic<bool>& paper_reset_in_progress) {
+    // D-526 call 4 (CS-311 + CS-298's archive half): the paper reset runs only in a PAPER session — ONE check, here at
+    // the EXECUTOR, so every requester passes it (the GUI's today; the headless paper-reset verb the E.2 plan homes).
+    // A LIVE session would have its OMS wiped and a tripped OMS-wide kill cleared (D-481: restart-only); an ephemeral one
+    // would archive fabricated state into data/paper_resets/. Refused LOUD; the slow paths a requester parked are
+    // released; the reset counter is untouched — nothing was reset.
+    if (!BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PAPER_PERSIST)) {
+        EngineSharded_PaperResetRefusedAtExecutor(stderr,
+            BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
+        paper_reset_in_progress.store(false, std::memory_order_release);
+        return;
+    }
     // v5.15.5.C.3 Phase 6 — paper-reset archive flow. Captures the prior session's state
     // into a timestamped directory BEFORE the OMS reset wipes paper_session_start_us.
     // Failures are NON-FATAL (log to stderr; continue with reset).

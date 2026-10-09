@@ -139,6 +139,17 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
                                   const char* filepath,
                                   int partial_exit_enabled) {
     if (!state || !state->oms || !filepath) return 0;
+    // D-526 (CS-298): the paper snapshot belongs to a PAPER session — the check is HERE, at the sink, so every route to
+    // a snapshot file passes it: the periodic and final saves, the reset archive, and a caller that spells its own path.
+    // LOUD: the existing requesters ask only in a PAPER session, so this line means one of them — or a new one — did not.
+    if (!BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PAPER_PERSIST)) {
+        fprintf(stderr, "[snapshot] save REFUSED: this session keeps no paper snapshot (%s) — %s not written\n",
+                BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)
+                    ? "a LIVE session: the exchange is the truth"
+                    : "an ephemeral session: a synthetic feed, a backtest or a test",
+                filepath);
+        return 0;
+    }
 
     // Write to .tmp first; rename only on full success.
     char tmppath[512];
@@ -270,6 +281,16 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
                                   int partial_exit_enabled,
                                   const ControllerConfig<F>* cfg = nullptr) {
     if (!state || !state->oms || !filepath) return 0;
+    // D-526 (CS-298): only a PAPER session restores the paper snapshot — at the sink, as the save is. LOUD for the same
+    // reason: the boot's own load is already skipped outside a PAPER session, so this line means a new caller.
+    if (!BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PAPER_PERSIST)) {
+        fprintf(stderr, "[snapshot] load REFUSED: this session keeps no paper snapshot (%s) — %s not read\n",
+                BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)
+                    ? "a LIVE session: the exchange is the truth"
+                    : "an ephemeral session: a synthetic feed, a backtest or a test",
+                filepath);
+        return 0;
+    }
     FILE* f = fopen(filepath, "rb");
     if (!f) {
         // Missing file is not an error — it's the first run.
