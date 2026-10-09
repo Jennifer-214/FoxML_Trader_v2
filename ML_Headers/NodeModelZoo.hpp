@@ -3815,7 +3815,9 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 // The family's lock is also what keeps a training run from rewriting a family a node serves (MP-6 (3c), D-503): a cell
 // binds a real ensemble through EnsembleModelZoo_PostLoadSetup and asserts the run refuses. Re-homing the state (a
 // node-owned dir gains the node id here) must keep a hold on the family the node serves, or retire that exclusion
-// consciously, with that cell.
+// consciously, with that cell. ⏩ Retired consciously for FRESH_ONLY (D-516 / D-518 — the backtest and a synthetic engine
+// session; CS-305): no learned state binds, so no family is held while such a node serves — harmless, since nothing is
+// saved and its models live in memory.
 //======================================================================
 // [CODE]
 //======================================================================

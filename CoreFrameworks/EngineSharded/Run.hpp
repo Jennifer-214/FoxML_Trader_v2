@@ -901,10 +901,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // default (notify_enabled=0). Notify_Send call sites in
     // PortfolioController + BinanceCrypto/Depth/UserData are shared headers
     // — they fire in both modes; g_notify being non-null is what gates
-    // actual delivery.
+    // actual delivery. Ephemeral (D-522 call 2, CS-299): a synthetic session never starts notify — `g_notify` stays
+    // null, notify's existing off-mode, so a fabricated kill trip sends no real-looking alert: this block is g_notify's
+    // ONE non-null writer, and Notify_Send returns on a null state itself (Notify.hpp — every send routes through it),
+    // so nothing reaches the command backend's popen. The WARN says notify is off.
     static NotifyState g_notify_state;
     static NotifyCommandState g_notify_cmd_state;
-    if (BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED)) {
+    if (!use_synthetic && BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED)) {
         NotifyBackendFn backend = NotifyBackend_Stderr;
         void *backend_state = nullptr;
         if (cfg.notify_backend == 1) {

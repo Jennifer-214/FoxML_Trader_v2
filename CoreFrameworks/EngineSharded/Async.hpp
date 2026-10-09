@@ -88,7 +88,7 @@
 struct CandleAccumulator;
 #endif
 
-#include "Boot.hpp"   // g_engine_sharded_shutdown — polled inside fan_out body; EngineSharded_SyntheticPaperResetRefused (D-518)
+#include "Boot.hpp"   // g_engine_sharded_shutdown — polled inside fan_out body; EngineSharded_PaperResetRefusedAt{Requester,Executor} (D-518, D-526)
 
 // parent_index: CoreFrameworks/EngineSharded.hpp
 
@@ -645,8 +645,10 @@ inline bool EngineSharded_Async_FanOut(
         // BEFORE RebuildAllParameters so Regime_ComputeSignals reads
         // the freshly-updated history.
         // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
-        // cycles, paper mode only — never a synthetic session (D-518 call 4: the boot passes live || synthetic in
-        // this argument, its one reader, so the ephemeral off-mode adds no instruction here). With slow_path_interval=8 ticks and
+        // cycles, paper mode only — never a synthetic session (D-518 call 4): `paper_persist_off` is the boot's "not a
+        // PAPER session" (live or a synthetic feed — D-526), read here by value, so the ephemeral off-mode adds no
+        // instruction; the saver checks the session itself (D-526 call 1). Its readers: this save request and the GUI's
+        // paper-reset request below (CS-300 (a)). With slow_path_interval=8 ticks and
         // ~10 ticks/sec that's roughly every 13 minutes — frequent
         // enough to bound state-loss-on-crash, infrequent enough to
         // not spam the disk. Atomic rename means a crash mid-save
@@ -823,10 +825,13 @@ inline bool EngineSharded_Async_FanOut(
         // engine leaves it set — the pre-existing interlock semantics, unchanged).
         if (shared_ptr && !ControllerConfig_IsLiveCapital(cfg) && TUI_CONSUME_FLAG(shared_ptr->paper_reset_requested)) { // NEW-1 — paper-reset interlock routes the single predicate
             if (paper_persist_off) {
-                // a synthetic session (live never reaches this branch): REFUSED, said (D-518 call 4) — the reset's archive
-                // would write the fabricated session into data/paper_resets/. Consumed, so the flag does not stay set;
+                // not a PAPER session: REFUSED, said (D-518 call 4) — a synthetic feed (the reset's archive would write the
+                // fabricated session into data/paper_resets/), OR a live boot: the live-capital check above reads the
+                // RUNNING cfg, which a reload can turn to paper (PARITY-087 / C3-1), while paper_persist_off is the boot's
+                // — so the line names both causes (CS-300 (b)); the composer refuses the same request (D-526 call 4).
+                // Consumed, so the flag does not stay set;
                 // nothing parks (only the composer's reset clears the park flag), nothing resets, the GUI's seq is untouched
-                EngineSharded_SyntheticPaperResetRefused(stderr);
+                EngineSharded_PaperResetRefusedAtRequester(stderr);
             } else {
                 paper_reset_in_progress.store(true, std::memory_order_release);
                 std::this_thread::yield();   // let slow-paths observe + park before ticks resume
@@ -862,7 +867,8 @@ inline bool EngineSharded_Async_FanOut(
 //     oms, slow_path_counter, ema_price, paper_reset_in_progress, topo_hot_cpu,
 //     topo_slow_cpu, topo_poll_interval
 //   - by-value captures (8): num_nodes, slow_path_interval, tsc_ghz, ema_alpha,
-//     paper_persist_off (live_trading's slot until D-518 call 4 — its one reader is the save gate),
+//     paper_persist_off (live_trading's slot until D-518 call 4 — the boot's "not a PAPER session", D-526; its
+//     readers: the periodic save's request and the GUI's paper-reset request),
 //     topo_producer_cpu, topo_drainer_cpu, topo_nproc
 //   - file-local-static args (6 — NOT captures; passed because they're function-local
 //     statics in EngineSharded_Run and CANNOT be referenced from header scope):

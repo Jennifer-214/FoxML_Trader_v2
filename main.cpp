@@ -75,8 +75,9 @@ int main(int argc, char *argv[]) {
     ControllerConfig<FP> ccfg = ControllerConfig_Load<FP>(cfg_path);
 
     // create the logging directory — the engine log, the runtime logs AND the paper OMS ledger
-    // go here (order_events.bin, replayed at every boot into the portfolio, the balance and
-    // realized P&L). So clearing logging/ is NOT a clean start: it wipes the paper ledger while
+    // go here (order_events.bin, replayed at every paper or live boot into the portfolio, the balance
+    // and realized P&L — a synthetic session keeps its ledger in memory, D-526). So clearing logging/
+    // is NOT a clean start: it wipes the paper ledger while
     // the restart snapshot (data/) and the learned model state, which live outside it, survive
     // — a half reset
     mkdir("logging", 0755); // EEXIST (or any error) is ignored; the freopen below reports a failure
