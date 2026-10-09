@@ -45,9 +45,10 @@
 //   - Different kinds are independent. Default cooldown = 60s.
 //
 // g_notify ownership:
-//   - extern declared here, defined in main.cpp (single TU).
-//   - Backtest leaves g_notify == nullptr → all callers must
-//     `if (g_notify) Notify_Send(...)`.
+//   - a C++17 inline variable defined HERE (one definition across TUs); its one non-null writer is
+//     EngineSharded_Run's notify block — never in a synthetic session (D-522 call 2).
+//   - Notify_Send returns on a null (or never-started) state itself, so a call through a null g_notify
+//     is a no-op — the backtest, the suite and a synthetic engine session leave it null and send nothing.
 //======================================================================================================
 #ifndef NOTIFY_HPP
 #define NOTIFY_HPP
@@ -170,9 +171,10 @@ struct NotifyState {
 
 // Global notifier pointer. C++17 inline variable — single definition across
 // translation units (avoids needing a Notify.cpp). Initialized to nullptr.
-// Live engine assigns &g_notify_state to it after NotifyState_Init when
-// cfg.notify_enabled=1. Backtest, controller_test, foxml_suite all leave it
-// null → callers must guard `if (g_notify) Notify_Send(...)`.
+// The engine assigns &g_notify_state to it after NotifyState_Init when notify is
+// enabled (MASK_OPS_CFG_NOTIFY_ENABLED) and the session is not synthetic (D-522 call 2).
+// Backtest, controller_test, foxml_suite all leave it null — Notify_Send returns on a
+// null state, so a call through it sends nothing (an `if (g_notify)` guard is optional).
 inline NotifyState *g_notify = nullptr;
 //======================================================================
 // [END_CODE]

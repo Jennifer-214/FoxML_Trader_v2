@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------------------
 // [TAG]_[[ENGINE] [BOOT_TIME] [CONCURRENCY] [MONITORING_PLANE]]
 // [SCHEMA]_[v1.0]
-// [OVERVIEW]_[boot-time shared globals + the SIGINT/SIGTERM handler — C++17 inline single-storage discipline; the synthetic feed's announcement (CS-282) and its two refusals (D-518)]
+// [OVERVIEW]_[boot-time shared globals + the SIGINT/SIGTERM handler — C++17 inline single-storage discipline; the synthetic feed's announcement (CS-282) and its live refusal (D-518); the paper reset's two refusals outside a PAPER session, at the GUI's request and at the composer (D-518, D-526)]
 // [REFERENCE]_[DESIGN_SPEC]_[cpp17-inline-variable-for-header-shared-state]
 // [CONTAINS]
 //   - [FUNCTION]_[EngineSharded_SignalHandler]
